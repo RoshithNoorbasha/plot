@@ -490,7 +490,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Fault Analytics",
     "🛠️ Failure / Rectified Entry",
     "📝 Live Fault Editor",
-    "➕ Quick Fault Entry",
+    "🔎 Search Faults",
     "📦 Bulk Failure / Restore"
 ])
 
@@ -722,62 +722,173 @@ with tab3:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# TAB 4 — QUICK FAULT ENTRY (fully dropdown-driven form)
+# TAB 4 — SEARCH FAULTS
 # ══════════════════════════════════════════════════════════════════════════
 with tab4:
-    st.subheader("Quick Fault Entry")
-    st.caption("Every field here is a dropdown — no typing required except an optional note under 'Other'.")
+    st.subheader("Search Faults")
+    st.caption("Find records by hierarchy, status, date range, remarks, serial number, or string number.")
+
+    search_df = df_filtered.copy()
+    selected_search_cols = []
 
     with st.container(border=True):
-        st.markdown("**1. Locate the string**")
-        hierarchy = select_hierarchy(df_master, key_prefix="qfe", layout="grid")
+        st.markdown("**Filters**")
+        f1, f2, f3, f4 = st.columns(4)
 
-        if hierarchy:
-            plot_val, block_val, sacu_val, inverter_val, string_val, matched_row = hierarchy
+        status_options = ["All"] + get_options(search_df, "Status")
+        status_choice = f1.selectbox("Status", status_options, key="search_status")
+        if status_choice != "All":
+            search_df = search_df[search_df["Status"].astype(str) == str(status_choice)]
 
-            st.markdown("**2. Serial number**")
-            existing_serial = ""
-            if not matched_row.empty and "Serial Number" in matched_row.columns:
-                sv = matched_row.iloc[0]["Serial Number"]
-                existing_serial = str(sv) if pd.notna(sv) else ""
+        plot_options = ["All"] + get_options(search_df, "Plot")
+        plot_choice = f2.selectbox("Plot", plot_options, key="search_plot")
+        if plot_choice != "All":
+            search_df = search_df[search_df["Plot"].astype(str) == str(plot_choice)]
 
-            if existing_serial.strip():
-                st.selectbox(
-                    "Serial Number (auto-detected)",
-                    [existing_serial],
-                    key="qfe_serial_locked",
-                    disabled=True
+        block_options = ["All"] + get_options(search_df, "Block")
+        block_choice = f3.selectbox("Block", block_options, key="search_block")
+        if block_choice != "All":
+            search_df = search_df[search_df["Block"].astype(str) == str(block_choice)]
+
+        sacu_options = ["All"] + get_options(search_df, "SACU")
+        sacu_choice = f4.selectbox("SACU", sacu_options, key="search_sacu")
+        if sacu_choice != "All":
+            search_df = search_df[search_df["SACU"].astype(str) == str(sacu_choice)]
+
+        f5, f6, f7, f8 = st.columns(4)
+
+        inverter_options = ["All"] + get_options(search_df, "Inverter ID")
+        inverter_choice = f5.selectbox("Inverter ID", inverter_options, key="search_inverter")
+        if inverter_choice != "All":
+            search_df = search_df[search_df["Inverter ID"].astype(str) == str(inverter_choice)]
+
+        string_query = f6.text_input("String No contains", key="search_string")
+        if string_query.strip():
+            search_df = search_df[
+                search_df["String No"].astype(str).str.contains(string_query.strip(), case=False, na=False)
+            ]
+
+        serial_query = f7.text_input("Serial Number contains", key="search_serial")
+        if serial_query.strip() and "Serial Number" in search_df.columns:
+            search_df = search_df[
+                search_df["Serial Number"].astype(str).str.contains(serial_query.strip(), case=False, na=False)
+            ]
+
+        remarks_query = f8.text_input("Remarks contains", key="search_remarks")
+        if remarks_query.strip() and "Remarks" in search_df.columns:
+            search_df = search_df[
+                search_df["Remarks"].astype(str).str.contains(remarks_query.strip(), case=False, na=False)
+            ]
+
+        keyword = st.text_input(
+            "Global search",
+            placeholder="Search plot, block, SACU, inverter, string, serial, remarks, status...",
+            key="search_keyword"
+        )
+        if keyword.strip():
+            searchable_cols = [
+                col for col in [
+                    "Plot", "Block", "SACU", "Inverter ID", "String No",
+                    "Serial Number", "Remarks", "Status"
+                ] if col in search_df.columns
+            ]
+            keyword_mask = pd.Series(False, index=search_df.index)
+            for col in searchable_cols:
+                keyword_mask = keyword_mask | search_df[col].astype(str).str.contains(
+                    keyword.strip(), case=False, na=False
                 )
-                serial_number = existing_serial
-            else:
-                known_serials = ["Not Assigned"] + get_options(df_master, "Serial Number")
-                serial_number = st.selectbox("Serial Number", known_serials, key="qfe_serial")
+            search_df = search_df[keyword_mask]
 
-            st.markdown("**3. Failure date & time**")
-            failure_dt = dropdown_datetime("qfe_fdt", "Select when the fault occurred")
+        with st.expander("Advanced filters and display"):
+            d1, d2 = st.columns(2)
+            use_failure_range = d1.checkbox("Filter by failure date", key="search_use_failure_date")
+            use_restored_range = d2.checkbox("Filter by restored date", key="search_use_restored_date")
 
-            st.markdown("**4. Failure reason**")
-            remark_choice = st.selectbox("Failure Remarks", FAULT_REMARK_OPTIONS, key="qfe_remark")
-            if remark_choice.startswith("Other"):
-                other_note = st.text_input("Brief note for 'Other'", key="qfe_remark_other")
-                remarks_val = other_note if other_note.strip() else "Other"
-            else:
-                remarks_val = remark_choice
+            if use_failure_range:
+                valid_failure = pd.to_datetime(search_df["Failure Date & Time"], errors="coerce").dropna()
+                default_start = valid_failure.min().date() if not valid_failure.empty else datetime.now().date()
+                default_end = valid_failure.max().date() if not valid_failure.empty else datetime.now().date()
+                failure_range = st.date_input(
+                    "Failure date range",
+                    value=(default_start, default_end),
+                    key="search_failure_range"
+                )
+                if len(failure_range) == 2:
+                    failure_start, failure_end = failure_range
+                    failure_dates = pd.to_datetime(search_df["Failure Date & Time"], errors="coerce").dt.date
+                    search_df = search_df[(failure_dates >= failure_start) & (failure_dates <= failure_end)]
 
-            st.write("")
-            if st.button("💾 Log Fault", type="primary", key="qfe_save"):
-                if has_open_duplicate(df_master, plot_val, block_val, sacu_val, inverter_val, string_val):
-                    st.warning("An open fault already exists for this string.")
-                else:
-                    new_row = build_new_failure_row(
-                        df_master, plot_val, block_val, sacu_val, inverter_val,
-                        string_val, serial_number, remarks_val, failure_dt
-                    )
-                    updated = pd.concat([df_master, pd.DataFrame([new_row])], ignore_index=True)
-                    finalize_and_persist(updated, "Fault logged successfully.", dl_key="dl_quick_entry")
+            if use_restored_range:
+                valid_restored = pd.to_datetime(search_df["Restored Date & Time"], errors="coerce").dropna()
+                default_start = valid_restored.min().date() if not valid_restored.empty else datetime.now().date()
+                default_end = valid_restored.max().date() if not valid_restored.empty else datetime.now().date()
+                restored_range = st.date_input(
+                    "Restored date range",
+                    value=(default_start, default_end),
+                    key="search_restored_range"
+                )
+                if len(restored_range) == 2:
+                    restored_start, restored_end = restored_range
+                    restored_dates = pd.to_datetime(search_df["Restored Date & Time"], errors="coerce").dt.date
+                    search_df = search_df[(restored_dates >= restored_start) & (restored_dates <= restored_end)]
 
+            h1, h2 = st.columns(2)
+            min_loss = h1.number_input("Minimum current loss hours", min_value=0.0, value=0.0, step=1.0)
+            max_loss_enabled = h2.checkbox("Set maximum current loss hours", key="search_max_loss_enabled")
+            if min_loss > 0 and "Current Loss Hours" in search_df.columns:
+                loss_hours = pd.to_numeric(search_df["Current Loss Hours"], errors="coerce").fillna(0)
+                search_df = search_df[loss_hours >= min_loss]
+            if max_loss_enabled and "Current Loss Hours" in search_df.columns:
+                max_loss = h2.number_input(
+                    "Maximum current loss hours",
+                    min_value=0.0,
+                    value=float(max(min_loss, 1.0)),
+                    step=1.0
+                )
+                loss_hours = pd.to_numeric(search_df["Current Loss Hours"], errors="coerce").fillna(0)
+                search_df = search_df[loss_hours <= max_loss]
 
-# ══════════════════════════════════════════════════════════════════════════
+            default_search_cols = [
+                "Plot", "Block", "SACU", "Inverter ID", "String No", "Serial Number",
+                "Failure Date & Time", "Restored Date & Time", "Current Loss Hours",
+                "Present Failure Hours", "Turn Around Time", "Remarks", "Status"
+            ]
+            available_search_cols = [col for col in default_search_cols if col in search_df.columns]
+            selected_search_cols = st.multiselect(
+                "Columns to show",
+                options=[col for col in df_master.columns if col in search_df.columns],
+                default=available_search_cols,
+                key="search_columns"
+            )
+
+    search_cols = selected_search_cols or [
+        col for col in [
+            "Plot", "Block", "SACU", "Inverter ID", "String No", "Serial Number",
+            "Failure Date & Time", "Restored Date & Time", "Current Loss Hours",
+            "Present Failure Hours", "Turn Around Time", "Remarks", "Status"
+        ] if col in search_df.columns
+    ]
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Search Results", len(search_df))
+    r2.metric("Open Results", int((search_df["Status"] == "OPEN").sum()) if "Status" in search_df.columns else 0)
+    r3.metric("Closed Results", int((search_df["Status"] == "CLOSED").sum()) if "Status" in search_df.columns else 0)
+
+    result_df = search_df[search_cols].copy() if search_cols else search_df.copy()
+    for hours_col in ["Current Loss Hours", "Present Failure Hours", "Turn Around Time"]:
+        result_df = format_hours_column(result_df, hours_col)
+
+    st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Download Search Results",
+        data=get_download_excel_bytes(search_df),
+        file_name="String_Fault_Search_Results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_search_results",
+        disabled=search_df.empty
+    )
+
 # TAB 5 — BULK FAILURE / RESTORE
 # Select down to an Inverter, then act on many strings under it in one go
 # instead of repeating the single-string flow string-by-string.
