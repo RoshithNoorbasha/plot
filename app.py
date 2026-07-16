@@ -19,7 +19,9 @@ st.set_page_config(
 
 WORK_START = time(6, 0)
 WORK_END = time(18, 0)
-DEFAULT_FILE_PATH = "strings_data_file.xlsx"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_FILE_NAME = "strings_data_file.xlsx"
+DEFAULT_FILE_PATH = os.path.join(APP_DIR, DEFAULT_FILE_NAME)
 SHEET_NAME = "String_Master"
 
 REQUIRED_COLUMNS = [
@@ -385,12 +387,15 @@ with st.sidebar:
         if os.path.exists(DEFAULT_FILE_PATH):
             try:
                 st.session_state.df_master = read_excel_source(DEFAULT_FILE_PATH)
-                st.session_state.data_source_label = DEFAULT_FILE_PATH
+                st.session_state.data_source_label = DEFAULT_FILE_NAME
                 st.success("Loaded default file.")
             except Exception as e:
-                st.error(f"Could not read '{DEFAULT_FILE_PATH}': {e}")
+                st.error(f"Could not read '{DEFAULT_FILE_NAME}': {e}")
         else:
-            st.error(f"File not found: {DEFAULT_FILE_PATH}. Upload a file instead.")
+            st.error(
+                f"File not found: {DEFAULT_FILE_NAME}. Expected it at: {DEFAULT_FILE_PATH}. "
+                "Make sure the file is committed/deployed with the app, or upload it instead."
+            )
 
     if load_upload_clicked and uploaded_file is not None:
         try:
@@ -405,7 +410,7 @@ with st.sidebar:
     if st.session_state.df_master is None and os.path.exists(DEFAULT_FILE_PATH):
         try:
             st.session_state.df_master = read_excel_source(DEFAULT_FILE_PATH)
-            st.session_state.data_source_label = DEFAULT_FILE_PATH
+            st.session_state.data_source_label = DEFAULT_FILE_NAME
         except Exception:
             pass
 
@@ -423,9 +428,10 @@ if st.session_state.df_master is None:
         <div class="hero">
             <h1>☀️ Pinnapuram String Monitoring Dashboard</h1>
             <p>No data loaded yet. Upload your String Master Excel file or place
-            <code>strings_data_file.xlsx</code> next to the app and click "Load default file" in the sidebar.</p>
+            <code>strings_data_file.xlsx</code> in the deployed app folder and click "Load default file" in the sidebar.</p>
         </div>
     """, unsafe_allow_html=True)
+    st.info(f"Default file expected at: {DEFAULT_FILE_PATH}")
     st.stop()
 
 df_master = enrich_fault_metrics(st.session_state.df_master)
