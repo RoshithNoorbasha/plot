@@ -33,17 +33,12 @@ CALC_COLUMNS = ["Status", "Turn Around Time", "Present Failure Hours", "Current 
 
 # Standard fault remark categories for the dropdown-only entry form.
 FAULT_REMARK_OPTIONS = [
-    "Thefted",
-    "Module Reverse",
-    "Module Pending",
-    "Physical / Module Damage",
-    "Series Connection Pending",
-    "JB failure"
     "Fuse Blown",
     "String Cable Damage",
     "Connector / MC4 Fault",
     "Communication Loss",
     "Earth Fault",
+    "Physical / Module Damage",
     "Rodent Damage",
     "Soiling / Shading Issue",
     "Other (specify below)",
@@ -51,22 +46,13 @@ FAULT_REMARK_OPTIONS = [
 
 # Standard rectification remark categories, used for both single and bulk restore.
 RESTORE_REMARK_OPTIONS = [
-    "Replacement Installed",          # Thefted
-    "Component Replaced",             # Module Reverse
-    "Component Installed",            # Module Pending
-    "Component Replaced",             # Physical / Module Damage
-    "Series Connection Completed",    # Series Connection Pending
-    "JB Replaced / Repaired",         # JB failure
-    "Fuse Replaced",                  # Fuse Blown
-    "Cable Repaired",                 # String Cable Damage
-    "Connector Fixed",                 # Connector / MC4 Fault
-    "Cleared Fault / Reset",          # Communication Loss
-    "Cleared Fault / Reset",          # Earth Fault
-    "Cable/Connector Repaired",       # Rodent Damage
-    "Cleaning Done",                  # Soiling / Shading Issue
-    "Other (specify below)",          # Other
+    "Component Replaced",
+    "Cable Repaired",
+    "Connector Fixed",
+    "Cleared Fault / Reset",
+    "Cleaning Done",
+    "Other (specify below)",
 ]
-
 
 MINUTE_STEPS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
 
@@ -511,153 +497,28 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ══════════════════════════════════════════════════════════════════════════
 # TAB 1 — ANALYTICS
 # ══════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════
-# TAB 1 — ANALYTICS
-# ══════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.subheader("📊 Block-wise String Performance Summary")
-
-    string_key = ["Plot", "Block", "SACU", "Inverter ID", "String No"]
-
-    # Base unique strings for real-time total count
-    unique_strings_df = df_filtered.drop_duplicates(subset=string_key).copy()
-
-    # Current OPEN strings (unique physical strings currently open)
-    open_strings_df = (
+    st.subheader("Open Faults by Block")
+    fault_counts = (
         df_filtered[df_filtered["Status"] == "OPEN"]
-        .drop_duplicates(subset=string_key)
-        .copy()
-    )
-
-    # Historical CLOSED rows
-    closed_fault_rows_df = df_filtered[df_filtered["Status"] == "CLOSED"].copy()
-
-    # Unique restored strings
-    closed_unique_strings_df = (
-        df_filtered[df_filtered["Status"] == "CLOSED"]
-        .drop_duplicates(subset=string_key)
-        .copy()
-    )
-
-    # Calculate block-wise metrics
-    total_by_block = (
-        unique_strings_df.groupby("Block")
-        .size()
-        .reset_index(name="Total Strings")
-    )
-
-    open_by_block = (
-        open_strings_df.groupby("Block")
-        .size()
+        .groupby("Block")["String No"]
+        .count()
         .reset_index(name="Open Faults")
     )
 
-    closed_by_block = (
-        closed_unique_strings_df.groupby("Block")
-        .size()
-        .reset_index(name="Closed/Restored")
-    )
-
-    # If you want historical restored EVENT count instead, use this:
-    # closed_by_block = (
-    #     closed_fault_rows_df.groupby("Block")
-    #     .size()
-    #     .reset_index(name="Closed/Restored")
-    # )
-
-    block_summary = (
-        total_by_block
-        .merge(open_by_block, on="Block", how="left")
-        .merge(closed_by_block, on="Block", how="left")
-        .fillna(0)
-    )
-
-    block_summary["Total Strings"] = block_summary["Total Strings"].astype(int)
-    block_summary["Open Faults"] = block_summary["Open Faults"].astype(int)
-    block_summary["Closed/Restored"] = block_summary["Closed/Restored"].astype(int)
-
-    block_summary["Working Strings"] = (
-        block_summary["Total Strings"] - block_summary["Open Faults"]
-    )
-
-    block_summary["Availability %"] = np.where(
-        block_summary["Total Strings"] > 0,
-        ((block_summary["Working Strings"] / block_summary["Total Strings"]) * 100).round(2),
-        0.0
-    )
-
-    block_summary = block_summary.sort_values("Block").reset_index(drop=True)
-
-    if not block_summary.empty:
-        def style_block_table(val, col_name=None):
-            if col_name == "Open Faults" and val > 0:
-                return "background-color: #fde2e2; color: #b3261e; font-weight: 600;"
-            elif col_name == "Closed/Restored" and val > 0:
-                return "background-color: #dcf5e3; color: #1e7a3a; font-weight: 600;"
-            elif col_name == "Working Strings" and val > 0:
-                return "background-color: #e3f2fd; color: #0d47a1; font-weight: 600;"
-            elif col_name == "Availability %":
-                if val >= 90:
-                    return "background-color: #e8f5e9; color: #1e7a3a; font-weight: 600;"
-                elif val >= 70:
-                    return "background-color: #fff3e0; color: #e65100; font-weight: 600;"
-                else:
-                    return "background-color: #fde2e2; color: #b3261e; font-weight: 600;"
-            return ""
-
-        styled_block_table = (
-            block_summary.style
-            .map(lambda v: style_block_table(v, "Open Faults"), subset=["Open Faults"])
-            .map(lambda v: style_block_table(v, "Closed/Restored"), subset=["Closed/Restored"])
-            .map(lambda v: style_block_table(v, "Working Strings"), subset=["Working Strings"])
-            .map(lambda v: style_block_table(v, "Availability %"), subset=["Availability %"])
-        )
-
-        st.dataframe(
-            styled_block_table,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Block": "Block Name",
-                "Total Strings": st.column_config.NumberColumn("Total Strings", format="%d"),
-                "Open Faults": st.column_config.NumberColumn("🔴 Open Faults", format="%d"),
-                "Closed/Restored": st.column_config.NumberColumn("🟢 Closed/Restored", format="%d"),
-                "Working Strings": st.column_config.NumberColumn("✅ Working Strings", format="%d"),
-                "Availability %": st.column_config.NumberColumn("📈 Availability %", format="%.2f%%")
-            }
-        )
-
-        st.caption(
-            f"Real-time unique strings in current filter: {len(unique_strings_df)} | "
-            f"Raw rows/fault history records: {len(df_filtered)}"
-        )
+    if not fault_counts.empty:
+        st.bar_chart(fault_counts.set_index("Block"), color="#1c6ea4")
     else:
-        st.info("No data available for the current filter.")
+        st.success("No active faults in current filter. ✅")
 
-    # 2. Fault Distribution by Block
-    st.subheader("📊 Fault Distribution by Block")
-    if not block_summary.empty:
-        chart_data = block_summary.set_index("Block")[["Open Faults", "Closed/Restored"]]
-        st.bar_chart(chart_data, color=["#ff6b6b", "#51cf66"])
-    else:
-        st.info("No fault distribution data available.")
-
-    def _highlight_status_with_color(val):
+    def _highlight_status(val):
         if val == "OPEN":
             return "background-color:#fde2e2;color:#b3261e;font-weight:600;"
         elif val == "CLOSED":
             return "background-color:#dcf5e3;color:#1e7a3a;font-weight:600;"
         return ""
 
-    def _highlight_row_color(row):
-        if row.get("Status") == "OPEN":
-            return ["background-color:#fde2e2"] * len(row)
-        elif row.get("Status") == "CLOSED":
-            return ["background-color:#dcf5e3"] * len(row)
-        return [""] * len(row)
-
-    # 3. Detailed Fault Details
-    st.subheader("📋 Detailed Fault Details")
+    st.subheader("Fault Details")
 
     display_cols = [
         "Plot", "Block", "SACU", "Inverter ID", "String No",
@@ -665,33 +526,40 @@ with tab1:
         "Present Failure Hours", "Turn Around Time", "Remarks", "Status"
     ]
     display_cols = [c for c in display_cols if c in df_filtered.columns]
-
-    detail_df = df_filtered[display_cols].copy()
-
-    if "Present Failure Hours" in detail_df.columns:
-        detail_df = detail_df.sort_values(by="Present Failure Hours", ascending=False)
-
+    detail_df = df_filtered[display_cols].sort_values(by="Present Failure Hours", ascending=False).copy()
+    
+    # Format hours columns for display
     detail_df = format_hours_column(detail_df, "Present Failure Hours")
     detail_df = format_hours_column(detail_df, "Turn Around Time")
 
-    styled_df = detail_df.style.apply(_highlight_row_color, axis=1)
-    if "Status" in detail_df.columns:
-        styled_df = styled_df.map(_highlight_status_with_color, subset=["Status"])
+    styled = detail_df.style.map(_highlight_status, subset=["Status"]) if "Status" in detail_df.columns else detail_df
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    st.subheader("🟢 Restored Fault Details")
+    st.caption("Faults that have been rectified, most recently restored first.")
 
-    # 4. Open Faults by Block
-    st.subheader("🔴 Open Faults by Block")
-    open_fault_counts = (
-        open_strings_df.groupby("Block")
-        .size()
-        .reset_index(name="Open Faults")
+    restored_cols = [
+        "Plot", "Block", "SACU", "Inverter ID", "String No", "Serial Number",
+        "Failure Date & Time", "Restored Date & Time", "Turn Around Time", "Remarks"
+    ]
+    restored_cols = [c for c in restored_cols if c in df_filtered.columns]
+    restored_df = (
+        df_filtered[df_filtered["Status"] == "CLOSED"][restored_cols]
+        .sort_values(by="Restored Date & Time", ascending=False)
+        .copy()
     )
 
-    if not open_fault_counts.empty:
-        st.bar_chart(open_fault_counts.set_index("Block"), color="#1c6ea4")
+    if restored_df.empty:
+        st.info("No restored faults in the current filter yet.")
     else:
-        st.success("No active faults in current filter. ✅")
+        c1, c2 = st.columns(2)
+        c1.metric("Total Restored", len(restored_df))
+        c2.metric("Avg Turn Around Time", format_hours_to_hms(restored_df['Turn Around Time'].mean()))
+        
+        # Format hours columns for display
+        restored_df = format_hours_column(restored_df, "Turn Around Time")
+        st.dataframe(restored_df, use_container_width=True, hide_index=True)
+
 # ══════════════════════════════════════════════════════════════════════════
 # TAB 2 — FAILURE / RECTIFIED ENTRY
 # ══════════════════════════════════════════════════════════════════════════
@@ -1067,17 +935,7 @@ with tab5:
                     )
 
                     st.markdown("**3. Failure date & time (applied to all selected)**")
-                    # Updated to use date_input and time_input instead of dropdown
-                    fail_col1, fail_col2 = st.columns(2)
-                    with fail_col1:
-                        failure_date = st.date_input("Failure Date", value=datetime.now().date(), key="bulk_fail_date")
-                    with fail_col2:
-                        failure_time = st.time_input(
-                            "Failure Time",
-                            value=datetime.now().time().replace(second=0, microsecond=0),
-                            key="bulk_fail_time"
-                        )
-                    failure_dt = datetime.combine(failure_date, failure_time)
+                    failure_dt = dropdown_datetime("bulk_fail_dt", "Select when the fault occurred")
 
                     st.markdown("**4. Failure reason (applied to all selected)**")
                     remark_choice = st.selectbox("Failure Remarks", FAULT_REMARK_OPTIONS, key="bulk_fail_remark")
@@ -1131,17 +989,7 @@ with tab5:
                     )
 
                     st.markdown("**3. Restored date & time (applied to all selected)**")
-                    # Updated to use date_input and time_input instead of dropdown
-                    restore_col1, restore_col2 = st.columns(2)
-                    with restore_col1:
-                        restored_date = st.date_input("Restored Date", value=datetime.now().date(), key="bulk_restore_date")
-                    with restore_col2:
-                        restored_time = st.time_input(
-                            "Restored Time",
-                            value=datetime.now().time().replace(second=0, microsecond=0),
-                            key="bulk_restore_time"
-                        )
-                    restored_dt = datetime.combine(restored_date, restored_time)
+                    restored_dt = dropdown_datetime("bulk_restore_dt", "Select when the fault was cleared")
 
                     st.markdown("**4. Rectification remarks (applied to all selected)**")
                     remark_choice = st.selectbox("Rectification Remarks", RESTORE_REMARK_OPTIONS, key="bulk_restore_remark")
