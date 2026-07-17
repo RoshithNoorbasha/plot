@@ -46,6 +46,7 @@ FAULT_REMARK_OPTIONS = [
     "Earth Fault",
     "Rodent Damage",
     "Soiling / Shading Issue",
+    "No Information"
     "Other (specify below)",
 ]
 
