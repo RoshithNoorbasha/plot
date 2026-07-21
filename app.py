@@ -1669,7 +1669,7 @@ def main():
                     st.error("Invalid username or password")
         
         st.markdown("---")
-        st.caption("Default users: admin/admin123, engineer1/eng123, engineer2/eng456")
+        st.caption("Default users:  ")
         return
     
     # Get current user
