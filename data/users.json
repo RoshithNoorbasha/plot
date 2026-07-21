@@ -1,0 +1,39 @@
+{
+  "admin": {
+    "password": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+    "role": "admin",
+    "assigned_plots": [
+      "P1",
+      "P2",
+      "P3",
+      "P4",
+      "P5",
+      "P6",
+      "P7",
+      "P8",
+      "P9",
+      "P10"
+    ],
+    "created_at": "2026-07-21T22:13:46.110848"
+  },
+  "engineer1": {
+    "password": "f63248efa4a61efc9f4c9f6e5de25b34b6f2b827717cd4c6b3905481c3bd483b",
+    "role": "engineer",
+    "assigned_plots": [
+      "P1",
+      "P2",
+      "P3"
+    ],
+    "created_at": "2026-07-21T22:13:46.110848"
+  },
+  "engineer2": {
+    "password": "a6cf15ca7d91c542a1be65f7cce95fe2d917803b5290a28f4c2e8c4d65a9a68e",
+    "role": "engineer",
+    "assigned_plots": [
+      "P4",
+      "P5",
+      "P6"
+    ],
+    "created_at": "2026-07-21T22:13:46.110848"
+  }
+}
