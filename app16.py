@@ -1,13 +1,9 @@
 import io
 import re
-from pathlib import Path
-from datetime import datetime
-
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-
 
 # ==========================================
 # 1. PAGE CONFIGURATION & STYLING
@@ -35,7 +31,6 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
 
 # ==========================================
 # 2. CONFIGURATION
@@ -87,69 +82,13 @@ MANUAL_SCADA_COLUMNS = [
     "VAB", "VBC", "VCA", "IA", "IB", "IC"
 ]
 
-BASE_STORAGE_DIR = Path("storage")
-UPLOADS_DIR = BASE_STORAGE_DIR / "uploads"
-PROCESSED_CSV_DIR = BASE_STORAGE_DIR / "processed_csv"
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-PROCESSED_CSV_DIR.mkdir(parents=True, exist_ok=True)
-
-# IMPORTANT:
-# Give full path if file is not in the same folder as app.py
-SCADA_FILE_PATH = Path(r"\D:\streamlit apps FastAPI\plot-1\storage\uploads\Sacu_data_all_plots_20260721_171613.xlsx")
-# Example full path:
-# SCADA_FILE_PATH = Path(r"D:\PV_Project\Sacu_data_all_plots_20260721_171613.xlsx")
-
-
 # ==========================================
-# 3. LOGIN
-# ==========================================
-def init_auth_state():
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-
-
-def login_screen():
-    st.title("🔐 PV SCADA Login")
-    st.write("Please login to continue.")
-
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        login_btn = st.form_submit_button("Login")
-
-    if login_btn:
-        app_username = st.secrets["app_auth"]["username"]
-        app_password = st.secrets["app_auth"]["password"]
-
-        if username == app_username and password == app_password:
-            st.session_state.authenticated = True
-            st.session_state.logged_user = username
-            st.rerun()
-        else:
-            st.error("Invalid username or password")
-
-
-def logout():
-    st.session_state.authenticated = False
-    st.session_state.logged_user = None
-    st.rerun()
-
-
-init_auth_state()
-
-if not st.session_state.authenticated:
-    login_screen()
-    st.stop()
-
-
-# ==========================================
-# 4. HELPERS
+# 3. HELPERS
 # ==========================================
 def normalize_text(value):
     if pd.isna(value):
         return ""
     return str(value).strip().upper()
-
 
 def clean_manual_columns(col_list):
     cleaned = []
@@ -159,7 +98,6 @@ def clean_manual_columns(col_list):
             cleaned.append(col)
     return cleaned
 
-
 def extract_plot(inverter_id_str):
     if isinstance(inverter_id_str, str):
         parts = inverter_id_str.split("-")
@@ -167,14 +105,12 @@ def extract_plot(inverter_id_str):
             return parts[0].strip()
     return "Unknown Plot"
 
-
 def extract_block(inverter_id_str):
     if isinstance(inverter_id_str, str):
         parts = inverter_id_str.split("-")
         if len(parts) > 1:
             return parts[1].strip()
     return "Unknown Block"
-
 
 def map_inverter_to_sacu(inverter_id_str):
     if not isinstance(inverter_id_str, str):
@@ -200,7 +136,6 @@ def map_inverter_to_sacu(inverter_id_str):
 
     return "Unknown SACU"
 
-
 def get_total_active_strings(plot, block):
     plot_key = normalize_text(plot)
     block_key = normalize_text(block)
@@ -209,7 +144,6 @@ def get_total_active_strings(plot, block):
         return ACTIVE_STRING_OVERRIDES[plot_key][block_key]
 
     return DEFAULT_TOTAL_ACTIVE_STRINGS
-
 
 def get_available_pv_columns(df):
     normalized_map = {str(col).strip().upper(): col for col in df.columns}
@@ -221,7 +155,6 @@ def get_available_pv_columns(df):
 
     return available_columns
 
-
 def calculate_working_string_count(row, pv_columns):
     count = 0
     for col in pv_columns:
@@ -229,7 +162,6 @@ def calculate_working_string_count(row, pv_columns):
         if pd.notna(value) and value > WORKING_CURRENT_THRESHOLD:
             count += 1
     return count
-
 
 def apply_string_metrics(df, plot_col="Plot", block_col="Block"):
     pv_columns = get_available_pv_columns(df)
@@ -261,7 +193,6 @@ def apply_string_metrics(df, plot_col="Plot", block_col="Block"):
 
     return df
 
-
 def find_header_row_index(file_stream, sheet_name, possible_header_columns, max_rows_to_check=100):
     file_stream.seek(0)
     temp_df = pd.read_excel(
@@ -283,7 +214,6 @@ def find_header_row_index(file_stream, sheet_name, possible_header_columns, max_
 
     return None
 
-
 def assign_manual_headers(df, manual_headers):
     manual_headers = clean_manual_columns(manual_headers)
 
@@ -294,7 +224,6 @@ def assign_manual_headers(df, manual_headers):
         df.columns = manual_headers[:len(df.columns)]
 
     return df
-
 
 def read_sheet_with_fallback(file_stream, sheet_name):
     header_row_index = find_header_row_index(file_stream, sheet_name, INVERTER_ID_COLS)
@@ -319,60 +248,8 @@ def read_sheet_with_fallback(file_stream, sheet_name):
 
     return df
 
-
-def detect_inverter_column(df):
-    df_columns_lower_map = {str(c).strip().lower(): c for c in df.columns}
-
-    for col in INVERTER_ID_COLS:
-        if col in df.columns:
-            return col
-        elif col.strip().lower() in df_columns_lower_map:
-            return df_columns_lower_map[col.strip().lower()]
-
-    return None
-
-
-def safe_name(text):
-    return re.sub(r"[^A-Za-z0-9_\-]+", "_", str(text)).strip("_")
-
-
-def save_source_excel(file_path):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    latest_path = UPLOADS_DIR / "latest_uploaded_scada.xlsx"
-    archive_path = UPLOADS_DIR / f"{safe_name(file_path.stem)}_{timestamp}.xlsx"
-
-    file_bytes = file_path.read_bytes()
-    latest_path.write_bytes(file_bytes)
-    archive_path.write_bytes(file_bytes)
-
-    info_path = UPLOADS_DIR / "latest_upload_info.txt"
-    info_path.write_text(
-        f"Source File: {file_path}\nSaved At: {timestamp}\n",
-        encoding="utf-8"
-    )
-
-
-def save_processed_csvs(dataframes_dict):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    for sheet_name, df in dataframes_dict.items():
-        clean_sheet_name = safe_name(sheet_name)
-
-        latest_csv = PROCESSED_CSV_DIR / f"{clean_sheet_name}_latest.csv"
-        archive_csv = PROCESSED_CSV_DIR / f"{clean_sheet_name}_{timestamp}.csv"
-
-        df.to_csv(latest_csv, index=False)
-        df.to_csv(archive_csv, index=False)
-
-    info_path = PROCESSED_CSV_DIR / "latest_processed_info.txt"
-    info_path.write_text(
-        f"Processed At: {timestamp}\nSheets: {', '.join(dataframes_dict.keys())}",
-        encoding="utf-8"
-    )
-
-
 # ==========================================
-# 5. PARSER
+# 4. PARSER
 # ==========================================
 @st.cache_data(show_spinner="Processing SCADA workbook...", ttl=3600)
 def process_scada_excel_bytes(file_bytes):
@@ -390,7 +267,16 @@ def process_scada_excel_bytes(file_bytes):
         df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed:", case=False, regex=True)]
         df = df.loc[:, ~df.columns.duplicated()].copy()
 
-        actual_inverter_col = detect_inverter_column(df)
+        df_columns_lower_map = {str(c).strip().lower(): c for c in df.columns}
+        actual_inverter_col = None
+
+        for col in INVERTER_ID_COLS:
+            if col in df.columns:
+                actual_inverter_col = col
+                break
+            elif col.strip().lower() in df_columns_lower_map:
+                actual_inverter_col = df_columns_lower_map[col.strip().lower()]
+                break
 
         if not actual_inverter_col:
             continue
@@ -420,7 +306,6 @@ def process_scada_excel_bytes(file_bytes):
 
     return processed_dfs
 
-
 def create_excel_download(dataframes_dict):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -430,44 +315,24 @@ def create_excel_download(dataframes_dict):
     buffer.seek(0)
     return buffer.getvalue()
 
-
 # ==========================================
-# 6. SIDEBAR
+# 5. UI
 # ==========================================
 st.sidebar.title("⚡ PV SCADA Control")
-st.sidebar.success(f"Logged in as: {st.session_state.get('logged_user', 'User')}")
+uploaded_file = st.sidebar.file_uploader("Upload SCADA Report (.xlsx)", type=["xlsx"])
 
-if st.sidebar.button("Logout"):
-    logout()
-
-st.sidebar.markdown("### Source File")
-st.sidebar.code(str(SCADA_FILE_PATH))
-
-
-# ==========================================
-# 7. MAIN FLOW
-# ==========================================
-if not SCADA_FILE_PATH.exists():
-    st.error(f"SCADA file not found: {SCADA_FILE_PATH}")
+if not uploaded_file:
+    st.info("Upload your SCADA Excel workbook from the sidebar.")
     st.stop()
 
-file_bytes = SCADA_FILE_PATH.read_bytes()
-
-save_source_excel(SCADA_FILE_PATH)
-
-processed_dataframes = process_scada_excel_bytes(file_bytes)
-
-if processed_dataframes:
-    save_processed_csvs(processed_dataframes)
+processed_dataframes = process_scada_excel_bytes(uploaded_file.getvalue())
 
 if not processed_dataframes:
-    st.error("No valid sheets or inverter columns were identified in the Excel file.")
+    st.error("No valid sheets or inverter columns were identified in the uploaded workbook.")
     st.stop()
-
 
 sheet_selection = st.sidebar.selectbox("Select Sheet", list(processed_dataframes.keys()))
 df_selected = processed_dataframes[sheet_selection].copy()
-actual_inverter_col = detect_inverter_column(df_selected)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filters")
@@ -489,16 +354,12 @@ selected_sacu = st.sidebar.selectbox("SACU", sacus)
 if selected_sacu != "All":
     filtered_df = filtered_df[filtered_df["SACU"] == selected_sacu]
 
-
-# ==========================================
-# 8. DASHBOARD
-# ==========================================
 st.title("Solar PV String Availability Dashboard")
 st.caption(f"Sheet: {sheet_selection} | Filtered inverters: {len(filtered_df)}")
 
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
-total_inverters = filtered_df[actual_inverter_col].nunique() if actual_inverter_col and not filtered_df.empty else 0
+total_inverters = filtered_df.iloc[:, 0].count() if not filtered_df.empty else 0
 total_strings = int(filtered_df["Total Active Strings"].sum()) if "Total Active Strings" in filtered_df.columns else 0
 working_strings = int(filtered_df["Working String Count"].sum()) if "Working String Count" in filtered_df.columns else 0
 failed_strings = int(filtered_df["Failed String Count"].sum()) if "Failed String Count" in filtered_df.columns else 0
@@ -522,7 +383,6 @@ with col1:
             Working_String_Count=("Working String Count", "sum"),
             Failed_String_Count=("Failed String Count", "sum")
         )
-
         fig_bar = px.bar(
             block_summary,
             x="Block",
@@ -552,18 +412,16 @@ with col2:
 st.markdown("---")
 st.subheader("Block Summary")
 
-if not filtered_df.empty and actual_inverter_col:
+if not filtered_df.empty:
     block_table = filtered_df.groupby("Block", as_index=False).agg(
-        Total_Inverters=(actual_inverter_col, "nunique"),
+        Total_Inverters=(df_selected.columns[2], "nunique"),
         Total_Active_Strings=("Total Active Strings", "sum"),
         Total_Working_Strings=("Working String Count", "sum"),
         Total_Failed_Strings=("Failed String Count", "sum")
     )
-
     block_table["Availability (%)"] = (
         (block_table["Total_Working_Strings"] / block_table["Total_Active_Strings"]) * 100
     ).fillna(0).round(2)
-
     block_table["Failure Percentage (%)"] = (
         (block_table["Total_Failed_Strings"] / block_table["Total_Active_Strings"]) * 100
     ).fillna(0).round(2)
@@ -595,6 +453,7 @@ st.dataframe(
 download_bytes = create_excel_download({sheet_selection: filtered_df})
 st.download_button(
     label="📥 Download Filtered Excel",
+    
     data=download_bytes,
     file_name=f"processed_{sheet_selection}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

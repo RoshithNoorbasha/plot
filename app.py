@@ -1,1182 +1,1845 @@
-import os
 import io
-import calendar
-from datetime import datetime, time, timedelta
-
-import numpy as np
+import re
+import json
+import os
+import hashlib
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+from datetime import datetime
+from pathlib import Path
 
-# ──────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────────────────────────────────
+# ==========================================
+# 1. PAGE CONFIGURATION & STYLING
+# ==========================================
 st.set_page_config(
-    page_title="Plot-1 String Dashboard - Plot 1",
+    page_title="PV SCADA Analytics",
     page_icon="☀️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-WORK_START = time(6, 0)
-WORK_END = time(18, 0)
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FILE_NAME = "strings_data_file.xlsx"
-DEFAULT_FILE_PATH = os.path.join(APP_DIR, DEFAULT_FILE_NAME)
-SHEET_NAME = "String_Master"
-
-REQUIRED_COLUMNS = [
-    "Plot", "Block", "SACU", "Inverter ID", "String No", "Serial Number",
-    "Remarks", "Failure Date & Time", "Restored Date & Time"
-]
-
-CALC_COLUMNS = ["Status", "Turn Around Time", "Present Failure Hours", "Current Loss Hours"]
-
-# Standard fault remark categories for the dropdown-only entry form.
-FAULT_REMARK_OPTIONS = [
-    "Thefted",
-    "Module Reverse",
-    "Module Pending",
-    "Physical / Module Damage",
-    "Series Connection Pending",
-    "JB failure"
-    "Fuse Blown",
-    "String Cable Damage",
-    "Connector / MC4 Fault",
-    "Communication Loss",
-    "Earth Fault",
-    "Rodent Damage",
-    "Soiling / Shading Issue",
-    "No Information",
-    "Other (specify below)",
-]
-
-# Standard rectification remark categories, used for both single and bulk restore.
-RESTORE_REMARK_OPTIONS = [
-    "Replacement Installed",          # Thefted
-    "Component Replaced",             # Module Reverse
-    "Component Installed",            # Module Pending
-    "Component Replaced",             # Physical / Module Damage
-    "Series Connection Completed",    # Series Connection Pending
-    "JB Replaced / Repaired",         # JB failure
-    "Fuse Replaced",                  # Fuse Blown
-    "Cable Repaired",                 # String Cable Damage
-    "Connector Fixed",                 # Connector / MC4 Fault
-    "Cleared Fault / Reset",          # Communication Loss
-    "Cleared Fault / Reset",          # Earth Fault
-    "Cable/Connector Repaired",       # Rodent Damage
-    "Cleaning Done",                  # Soiling / Shading Issue
-    "Other (specify below)",          # Other
-]
-
-
-MINUTE_STEPS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
-
-# ──────────────────────────────────────────────────────────────────────────
-# STYLE
-# ──────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.main { background: linear-gradient(180deg, #f6f9fc 0%, #eef4f9 100%); }
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-
-.hero {
-    background: linear-gradient(120deg, #0f3d63 0%, #1c6ea4 55%, #2f9bd6 100%);
-    border-radius: 20px;
-    padding: 28px 32px;
-    color: white;
-    margin-bottom: 1.4rem;
-    box-shadow: 0 10px 30px rgba(15,61,99,0.25);
-}
-.hero h1 { color: white; margin-bottom: 4px; font-size: 1.9rem; }
-.hero p { color: #dceefb; margin: 0; font-size: 0.95rem; }
-
-div[data-testid="stMetric"] {
-    background: white;
-    border-radius: 16px;
-    padding: 14px 16px;
-    box-shadow: 0 4px 18px rgba(0,0,0,0.06);
-    border: 1px solid #e7edf3;
-}
-h1, h2, h3 { color: #16324f; }
-
-.badge {
-    display: inline-block;
-    padding: 3px 12px;
-    border-radius: 999px;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-}
-.badge-open { background: #fde2e2; color: #b3261e; }
-.badge-closed { background: #dcf5e3; color: #1e7a3a; }
-.badge-none { background: #eef1f4; color: #64748b; }
-
-.status-pill { text-align: center; }
+    .main .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+    .stMetric {
+        background-color: #0f172a;
+        border: 1px solid #1e293b;
+        padding: 1rem;
+        border-radius: 0.75rem;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.7rem;
+        font-weight: 700;
+        color: #38bdf8;
+    }
+    /* Heat map header colors */
+    .string-header-high { background-color: #10b981; color: white; }
+    .string-header-medium { background-color: #f59e0b; color: white; }
+    .string-header-low { background-color: #ef4444; color: white; }
+    .string-header-verylow { background-color: #7f1d1d; color: white; }
+    .stDataFrame thead th {
+        background-color: #1e293b;
+        color: white;
+        font-weight: 600;
+    }
+    .user-badge-admin {
+        background-color: #8b5cf6;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.7rem;
+        font-weight: 600;
+    }
+    .user-badge-engineer {
+        background-color: #3b82f6;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.7rem;
+        font-weight: 600;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# ==========================================
+# 2. CONFIGURATION
+# ==========================================
+DEFAULT_TOTAL_ACTIVE_STRINGS = 19
+WORKING_CURRENT_THRESHOLD = 0.5
+PV_CURRENT_COLUMNS = [f"PV-I{i}" for i in range(1, 29)]
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+USERS_FILE = DATA_DIR / "users.json"
+EXCEL_FILES_DIR = DATA_DIR / "excel_files"
+EXCEL_FILES_DIR.mkdir(exist_ok=True)
 
-# ──────────────────────────────────────────────────────────────────────────
-# CORE HELPERS
-# ──────────────────────────────────────────────────────────────────────────
-def _blank_master_df():
-    df = pd.DataFrame(columns=REQUIRED_COLUMNS)
-    return df
+ACTIVE_STRING_OVERRIDES = {
+    "P2": {
+        "IB1": 18,
+        "IB3": 17,
+        "IB4": 18,
+        "IB5": 18,
+    },
+    "P6": {
+        "IB1": 18,
+        "IB2": 18,
+        "IB3": 18,
+        "IB5": 18,
+        "IB6": 18,
+        "IB7": 18,
+    }
+}
 
+INVERTER_ID_COLS = [
+    "Inverter ID",
+    "Inverter_ID",
+    "Inverter",
+    "ID",
+    "Device Name",
+    "String Inverter",
+    "Inverters"
+]
 
-def read_excel_source(file_like_or_path):
-    """Read the String_Master sheet from a path or an uploaded file object."""
-    df = pd.read_excel(file_like_or_path, sheet_name=SHEET_NAME)
-    for col in ["Failure Date & Time", "Restored Date & Time"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in REQUIRED_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-    df = df.reset_index(drop=True)
-    return df
+MANUAL_SCADA_COLUMNS = [
+    "String Inverter",
+    "MBUS",
+    "Grid",
+    "E-Daily(KWH)",
+    "Active Power",
+    "Reactive Power",
+    "PV1", "PV2", "PV3", "PV4", "PV5", "PV6", "PV7", "PV8", "PV9", "PV10",
+    "PV11", "PV12", "PV13", "PV14", "PV15", "PV16", "PV17", "PV18", "PV19", "PV20",
+    "PV21", "PV22", "PV23", "PV24", "PV25", "PV26", "PV27", "PV28",
+    "PV-I1", "PV-I2", "PV-I3", "PV-I4", "PV-I5", "PV-I6", "PV-I7", "PV-I8", "PV-I9", "PV-I10",
+    "PV-I11", "PV-I12", "PV-I13", "PV-I14", "PV-I15", "PV-I16", "PV-I17", "PV-I18", "PV-I19", "PV-I20",
+    "PV-I21", "PV-I22", "PV-I23", "PV-I24", "PV-I25", "PV-I26", "PV-I27", "PV-I28",
+    "VAB", "VBC", "VCA", "IA", "IB", "IC"
+]
 
+# ==========================================
+# 3. USER MANAGEMENT
+# ==========================================
+def load_users():
+    """Load users from JSON file"""
+    if USERS_FILE.exists():
+        with open(USERS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
 
-def calculate_working_hours_vectorized(start, end, work_start_hour=6, work_end_hour=18):
-    """Vectorized replacement for the old per-row, day-by-day Python loop.
-    Produces byte-for-byte identical results (verified against the original
-    on 3000+ randomized cases) but runs on the whole column at once instead
-    of calling a Python function once per row. This was the single biggest
-    cause of lag: the old version recomputed every OPEN fault's age with an
-    inner day-by-day loop, called via .apply(), on every rerun."""
-    start = pd.to_datetime(pd.Series(start))
-    end = pd.to_datetime(pd.Series(end))
-    work_span = work_end_hour - work_start_hour
+def save_users(users):
+    """Save users to JSON file"""
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f, indent=2)
 
-    valid = start.notna() & end.notna() & (end > start)
+def init_default_users():
+    """Initialize default users if no users exist"""
+    users = load_users()
+    if not users:
+        default_users = {
+            "admin": {
+                "password": hashlib.sha256("admin123".encode()).hexdigest(),
+                "role": "admin",
+                "assigned_plots": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"],
+                "created_at": datetime.now().isoformat()
+            },
+            "engineer1": {
+                "password": hashlib.sha256("eng123".encode()).hexdigest(),
+                "role": "engineer",
+                "assigned_plots": ["P1", "P2", "P3"],
+                "created_at": datetime.now().isoformat()
+            },
+            "engineer2": {
+                "password": hashlib.sha256("eng456".encode()).hexdigest(),
+                "role": "engineer",
+                "assigned_plots": ["P4", "P5", "P6"],
+                "created_at": datetime.now().isoformat()
+            }
+        }
+        save_users(default_users)
+        return default_users
+    return users
 
-    # Fill NaT with a placeholder so date/time math below doesn't error;
-    # invalid rows are zeroed out at the very end via `valid`.
-    s = start.fillna(pd.Timestamp("2000-01-01"))
-    e = end.fillna(pd.Timestamp("2000-01-01"))
+def authenticate_user(username, password):
+    """Authenticate user with password"""
+    users = load_users()
+    if username in users:
+        hashed_pwd = hashlib.sha256(password.encode()).hexdigest()
+        if users[username]["password"] == hashed_pwd:
+            return users[username]
+    return None
 
-    start_date = s.dt.floor("D")
-    end_date = e.dt.floor("D")
-    same_day = start_date == end_date
+def get_current_user():
+    """Get current user from session state"""
+    if "user" in st.session_state:
+        return st.session_state.user
+    return None
 
-    ws_start = start_date + pd.Timedelta(hours=work_start_hour)
-    we_start = start_date + pd.Timedelta(hours=work_end_hour)
-    ws_end = end_date + pd.Timedelta(hours=work_start_hour)
-    we_end = end_date + pd.Timedelta(hours=work_end_hour)
+# ==========================================
+# 4. EXCEL FILE MANAGEMENT (Backend Storage)
+# ==========================================
+def save_excel_file(file_bytes, filename):
+    """Save uploaded Excel file to backend storage"""
+    # Generate unique filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_hash = hashlib.md5(file_bytes).hexdigest()[:8]
+    stored_filename = f"{timestamp}_{file_hash}_{filename}"
+    file_path = EXCEL_FILES_DIR / stored_filename
+    
+    # Save file
+    with open(file_path, 'wb') as f:
+        f.write(file_bytes)
+    
+    # Store metadata
+    metadata_file = EXCEL_FILES_DIR / "metadata.json"
+    metadata = {}
+    if metadata_file.exists():
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+    
+    metadata[stored_filename] = {
+        "original_filename": filename,
+        "timestamp": timestamp,
+        "file_hash": file_hash,
+        "file_size": len(file_bytes)
+    }
+    
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    # Update session state
+    st.session_state.current_file = stored_filename
+    return stored_filename
 
-    same_day_hours = ((e.clip(lower=ws_start, upper=we_start) - s.clip(lower=ws_start, upper=we_start))
-                       .dt.total_seconds() / 3600).clip(lower=0)
-
-    first_day_hours = ((we_start - s.clip(lower=ws_start, upper=we_start)).dt.total_seconds() / 3600).clip(lower=0)
-    last_day_hours = ((e.clip(lower=ws_end, upper=we_end) - ws_end).dt.total_seconds() / 3600).clip(lower=0)
-    days_between = ((end_date - start_date).dt.days - 1).clip(lower=0)
-    middle_hours = days_between * work_span
-
-    multi_day_hours = first_day_hours + middle_hours + last_day_hours
-
-    result = np.where(same_day.to_numpy(), same_day_hours.to_numpy(), multi_day_hours.to_numpy())
-    result = np.where(valid.to_numpy(), result, 0.0)
-    return np.round(result, 2)
-
-
-def enrich_fault_metrics(df):
-    """Vectorized: Status, Turn Around Time, Present Failure Hours and
-    Current Loss Hours for the WHOLE dataframe in a handful of column-level
-    operations, instead of 4 separate row-by-row .apply() passes. This runs
-    on every Streamlit rerun (i.e. every filter click), so its speed is
-    what determines how laggy the app feels."""
-    df = df.copy()
-    now = pd.Timestamp.now()
-
-    failure = pd.to_datetime(df["Failure Date & Time"], errors="coerce")
-    restored = pd.to_datetime(df["Restored Date & Time"], errors="coerce")
-    df["Failure Date & Time"] = failure
-    df["Restored Date & Time"] = restored
-
-    status = np.select(
-        [failure.notna() & restored.isna(), failure.notna() & restored.notna()],
-        ["OPEN", "CLOSED"],
-        default=""
-    )
-    df["Status"] = status
-
-    tat = calculate_working_hours_vectorized(failure, restored)
-    df["Turn Around Time"] = np.where(status == "CLOSED", tat, 0.0)
-
-    present = calculate_working_hours_vectorized(failure, pd.Series(now, index=df.index))
-    df["Present Failure Hours"] = np.where((status == "OPEN") & failure.notna(), present, 0.0)
-
-    df["Current Loss Hours"] = np.where(
-        status == "OPEN", df["Present Failure Hours"],
-        np.where(status == "CLOSED", df["Turn Around Time"], 0.0)
-    )
-
-    return df
-
-
-def get_download_excel_bytes(df):
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df.to_excel(writer, sheet_name=SHEET_NAME, index=False)
-    buffer.seek(0)
-    return buffer
-
-
-def persist_to_disk(df, path=DEFAULT_FILE_PATH):
-    """Best-effort save back to the source file so data survives a full app
-    restart. If the filesystem is read-only (common on hosted deployments)
-    this silently fails - the in-memory session_state copy is always the
-    source of truth for the running session regardless."""
-    try:
-        with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
-            df.to_excel(writer, sheet_name=SHEET_NAME, index=False)
-        return True
-    except Exception:
-        return False
-
-
-def get_options(df, col):
-    if col not in df.columns:
-        return []
-    return sorted([x for x in df[col].dropna().astype(str).unique().tolist() if str(x).strip() != ""])
-
-
-def status_badge_html(status):
-    if status == "OPEN":
-        return '<span class="badge badge-open">● OPEN</span>'
-    elif status == "CLOSED":
-        return '<span class="badge badge-closed">● CLOSED</span>'
-    return '<span class="badge badge-none">—</span>'
-
-
-def format_hours_to_hms(decimal_hours):
-    """Convert decimal hours to 'X hrs Y mins' format."""
-    if decimal_hours == 0 or pd.isna(decimal_hours):
-        return "0 hrs 0 mins"
-    hours = int(decimal_hours)
-    minutes = int((decimal_hours - hours) * 60)
-    return f"{hours} hrs {minutes} mins"
-
-
-def format_hours_column(df, col_name):
-    """Format a column of decimal hours to 'X hrs Y mins' format."""
-    if col_name in df.columns:
-        df[col_name] = df[col_name].apply(format_hours_to_hms)
-    return df
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# SHARED FORM WIDGETS
-# Pulled out once and reused by every entry point (New Failure tab, Quick
-# Fault Entry tab) instead of being copy-pasted per tab.
-# ──────────────────────────────────────────────────────────────────────────
-def select_hierarchy(df_source, key_prefix, layout="vertical", include_string=True):
-    """Cascading Plot → Block → SACU → Inverter (→ String) dropdown chain.
-    With include_string=True (default) returns
-    (plot, block, sacu, inverter, string_no, matched_row).
-    With include_string=False stops one level up and returns
-    (plot, block, sacu, inverter, df_inverter) — used by the Bulk tab, which
-    needs every string under an inverter rather than just one.
-    Returns None if the source data has no Plot values at all."""
-    plot_options = get_options(df_source, "Plot")
-    if not plot_options:
-        st.warning("No 'Plot' values found in the master data.")
+def get_latest_excel_file():
+    """Get the most recent Excel file"""
+    metadata_file = EXCEL_FILES_DIR / "metadata.json"
+    if not metadata_file.exists():
         return None
+    
+    with open(metadata_file, 'r') as f:
+        metadata = json.load(f)
+    
+    if not metadata:
+        return None
+    
+    # Get latest file by timestamp
+    latest_file = max(metadata.items(), key=lambda x: x[1]["timestamp"])
+    return latest_file[0]
 
-    n_cols = 5 if include_string else 4
-    cols = st.columns(n_cols) if layout == "grid" else [st.container() for _ in range(n_cols)]
+def load_excel_from_backend(filename):
+    """Load Excel file from backend storage"""
+    file_path = EXCEL_FILES_DIR / filename
+    if file_path.exists():
+        with open(file_path, 'rb') as f:
+            return f.read()
+    return None
 
-    plot_val = cols[0].selectbox("Plot", plot_options, key=f"{key_prefix}_plot")
-    df_plot = df_source[df_source["Plot"].astype(str) == str(plot_val)]
+# ==========================================
+# 5. HELPERS
+# ==========================================
+def normalize_text(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip().upper()
 
-    block_val = cols[1].selectbox("Block", get_options(df_plot, "Block"), key=f"{key_prefix}_block")
-    df_block = df_plot[df_plot["Block"].astype(str) == str(block_val)]
+def clean_manual_columns(col_list):
+    cleaned = []
+    for col in col_list:
+        col = str(col).strip()
+        if col and col.lower() != "nan":
+            cleaned.append(col)
+    return cleaned
 
-    sacu_val = cols[2].selectbox("SACU", get_options(df_block, "SACU"), key=f"{key_prefix}_sacu")
-    df_sacu = df_block[df_block["SACU"].astype(str) == str(sacu_val)]
+def extract_plot(inverter_id_str):
+    if isinstance(inverter_id_str, str):
+        parts = inverter_id_str.split("-")
+        if len(parts) > 0:
+            return parts[0].strip()
+    return "Unknown Plot"
 
-    inverter_val = cols[3].selectbox("Inverter ID", get_options(df_sacu, "Inverter ID"), key=f"{key_prefix}_inv")
-    df_inverter = df_sacu[df_sacu["Inverter ID"].astype(str) == str(inverter_val)]
+def extract_block(inverter_id_str):
+    if isinstance(inverter_id_str, str):
+        parts = inverter_id_str.split("-")
+        if len(parts) > 1:
+            return parts[1].strip()
+    return "Unknown Block"
 
-    if not include_string:
-        return plot_val, block_val, sacu_val, inverter_val, df_inverter
+def map_inverter_to_sacu(inverter_id_str):
+    if not isinstance(inverter_id_str, str):
+        return "Invalid Inverter ID"
 
-    string_val = cols[4].selectbox("String No", get_options(df_inverter, "String No"), key=f"{key_prefix}_string")
-    matched_row = df_inverter[df_inverter["String No"].astype(str) == str(string_val)].head(1)
-
-    return plot_val, block_val, sacu_val, inverter_val, string_val, matched_row
-
-
-def dropdown_datetime(key_prefix, label, default=None):
-    """Pure dropdown Year/Month/Day/Hour/Minute picker - no calendar/clock
-    widget - so every field on the form is a selectbox."""
-    default = default or datetime.now()
-    st.caption(label)
-    dcols = st.columns(5)
-
-    years = list(range(datetime.now().year - 2, datetime.now().year + 1))
-    year = dcols[0].selectbox("Year", years, index=years.index(default.year) if default.year in years else len(years) - 1, key=f"{key_prefix}_yr")
-
-    month = dcols[1].selectbox("Month", list(range(1, 13)), index=default.month - 1, key=f"{key_prefix}_mo", format_func=lambda m: calendar.month_abbr[m])
-
-    max_day = calendar.monthrange(year, month)[1]
-    day = dcols[2].selectbox("Day", list(range(1, max_day + 1)), index=min(default.day, max_day) - 1, key=f"{key_prefix}_dy")
-
-    hour = dcols[3].selectbox("Hour", list(range(0, 24)), index=default.hour, key=f"{key_prefix}_hr", format_func=lambda h: f"{h:02d}")
-
-    nearest_minute = min(MINUTE_STEPS, key=lambda m: abs(m - default.minute))
-    minute = dcols[4].selectbox("Minute", MINUTE_STEPS, index=MINUTE_STEPS.index(nearest_minute), key=f"{key_prefix}_mi", format_func=lambda m: f"{m:02d}")
-
-    return datetime(year, month, day, hour, minute)
-
-
-def has_open_duplicate(df_master, plot, block, sacu, inverter, string_no):
-    return not df_master[
-        (df_master["Plot"].astype(str) == str(plot)) &
-        (df_master["Block"].astype(str) == str(block)) &
-        (df_master["SACU"].astype(str) == str(sacu)) &
-        (df_master["Inverter ID"].astype(str) == str(inverter)) &
-        (df_master["String No"].astype(str) == str(string_no)) &
-        (df_master["Status"] == "OPEN")
-    ].empty
-
-
-def build_new_failure_row(df_master, plot, block, sacu, inverter, string_no, serial, remarks, failure_dt):
-    new_row = {col: None for col in df_master.columns}
-    new_row.update({
-        "Plot": plot,
-        "Block": block,
-        "SACU": sacu,
-        "Inverter ID": inverter,
-        "String No": string_no,
-        "Serial Number": serial if str(serial).strip() not in ("", "Not Assigned") else None,
-        "Remarks": remarks,
-        "Failure Date & Time": failure_dt,
-        "Restored Date & Time": pd.NaT,
-    })
-    return new_row
-
-
-def finalize_and_persist(updated_df, success_msg, dl_key):
-    """One shared tail-end for every save action: recompute metrics, push
-    into session_state, best-effort write to disk, confirm to the user,
-    offer a download, and rerun."""
-    updated_df = enrich_fault_metrics(updated_df)
-    st.session_state.df_master = updated_df
-    saved_ok = persist_to_disk(updated_df, DEFAULT_FILE_PATH)
-
-    st.success(success_msg + ("" if saved_ok else " (Saved for this session — could not write to disk.)"))
-    st.download_button(
-        "⬇️ Download Updated Excel",
-        data=get_download_excel_bytes(updated_df),
-        file_name="String_Master_Plot1_Updated.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=dl_key
-    )
-    st.rerun()
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# SESSION STATE INITIALISATION
-# The #1 reason "create / restore" previously appeared broken: load_data()
-# was wrapped in @st.cache_data and read from a DIFFERENT file than the one
-# saves were written to, so a fresh reload after every st.rerun() silently
-# threw away every new/edited row. All state now lives in
-# st.session_state.df_master and is only ever (re)loaded from disk when the
-# user explicitly asks for it.
-# ──────────────────────────────────────────────────────────────────────────
-if "df_master" not in st.session_state:
-    st.session_state.df_master = None
-    st.session_state.data_source_label = None
-
-with st.sidebar:
-    st.markdown("### ☀️ Plant Data Source")
-
-    uploaded_file = st.file_uploader("Upload String Master (.xlsx)", type=["xlsx"])
-
-    col_a, col_b = st.columns(2)
-    load_default_clicked = col_a.button("📂 Load default file", use_container_width=True)
-    load_upload_clicked = col_b.button("⬆️ Use upload", use_container_width=True, disabled=uploaded_file is None)
-
-    if load_default_clicked:
-        if os.path.exists(DEFAULT_FILE_PATH):
-            try:
-                st.session_state.df_master = read_excel_source(DEFAULT_FILE_PATH)
-                st.session_state.data_source_label = DEFAULT_FILE_NAME
-                st.success("Loaded default file.")
-            except Exception as e:
-                st.error(f"Could not read '{DEFAULT_FILE_NAME}': {e}")
-        else:
-            st.error(
-                f"File not found: {DEFAULT_FILE_NAME}. Expected it at: {DEFAULT_FILE_PATH}. "
-                "Make sure the file is committed/deployed with the app, or upload it instead."
-            )
-
-    if load_upload_clicked and uploaded_file is not None:
+    match = re.search(r'-(\d[\.\-]\d)-', inverter_id_str)
+    if match:
+        sacu_identifier = match.group(1)
         try:
-            st.session_state.df_master = read_excel_source(uploaded_file)
-            st.session_state.data_source_label = uploaded_file.name
-            st.success("Loaded uploaded file.")
-        except Exception as e:
-            st.error(f"Could not read uploaded file: {e}")
+            if "." in sacu_identifier:
+                first_digit_str = sacu_identifier.split(".")[0]
+            else:
+                first_digit_str = sacu_identifier.split("-")[0]
 
-    # First-ever run: try the default path automatically so the app isn't
-    # blank on first open.
-    if st.session_state.df_master is None and os.path.exists(DEFAULT_FILE_PATH):
-        try:
-            st.session_state.df_master = read_excel_source(DEFAULT_FILE_PATH)
-            st.session_state.data_source_label = DEFAULT_FILE_NAME
-        except Exception:
+            first_digit = int(first_digit_str)
+
+            if first_digit in [1, 2]:
+                return "SACU-1"
+            elif first_digit in [3, 4]:
+                return "SACU-2"
+        except ValueError:
             pass
 
-    if st.session_state.data_source_label:
-        st.caption(f"Current source: **{st.session_state.data_source_label}**")
+    return "Unknown SACU"
 
-    st.divider()
+def get_total_active_strings(plot, block):
+    plot_key = normalize_text(plot)
+    block_key = normalize_text(block)
 
+    if plot_key in ACTIVE_STRING_OVERRIDES and block_key in ACTIVE_STRING_OVERRIDES[plot_key]:
+        return ACTIVE_STRING_OVERRIDES[plot_key][block_key]
 
-# ──────────────────────────────────────────────────────────────────────────
-# MAIN
-# ──────────────────────────────────────────────────────────────────────────
-if st.session_state.df_master is None:
-    st.markdown("""
-        <div class="hero">
-            <h1>☀️ Plot-1 String Monitoring Dashboard</h1>
-            <p>No data loaded yet. Upload your String Master Excel file or place
-            <code>strings_data_file.xlsx</code> in the deployed app folder and click "Load default file" in the sidebar.</p>
-        </div>
-    """, unsafe_allow_html=True)
-    st.info(f"Default file expected at: {DEFAULT_FILE_PATH}")
-    st.stop()
+    return DEFAULT_TOTAL_ACTIVE_STRINGS
 
-df_master = enrich_fault_metrics(st.session_state.df_master)
-st.session_state.df_master = df_master
+def get_available_pv_columns(df):
+    normalized_map = {str(col).strip().upper(): col for col in df.columns}
+    available_columns = []
 
-st.markdown("""
-    <div class="hero">
-        <h1>☀️ Plot-1 String Monitoring Dashboard</h1>
-        <p>Business-hour fault analytics · Working hours: 6:00 AM – 6:00 PM</p>
-    </div>
-""", unsafe_allow_html=True)
+    for col in PV_CURRENT_COLUMNS:
+        if col.upper() in normalized_map:
+            available_columns.append(normalized_map[col.upper()])
 
-# ── Sidebar filters ─────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 🔍 Plant Hierarchy Filter")
+    return available_columns
 
-    blocks = ["All"] + get_options(df_master, "Block")
-    selected_block = st.selectbox("Block", blocks)
-    df_filtered = df_master if selected_block == "All" else df_master[df_master["Block"].astype(str) == selected_block]
+def calculate_working_string_count(row, pv_columns):
+    count = 0
+    for col in pv_columns:
+        value = pd.to_numeric(row.get(col), errors="coerce")
+        if pd.notna(value) and value > WORKING_CURRENT_THRESHOLD:
+            count += 1
+    return count
 
-    sacus = ["All"] + get_options(df_filtered, "SACU")
-    selected_sacu = st.selectbox("SACU", sacus)
-    if selected_sacu != "All":
-        df_filtered = df_filtered[df_filtered["SACU"].astype(str) == selected_sacu]
+def apply_string_metrics(df, plot_col="Plot", block_col="Block"):
+    pv_columns = get_available_pv_columns(df)
 
-    inverters = ["All"] + get_options(df_filtered, "Inverter ID")
-    selected_inverter = st.selectbox("Inverter", inverters)
-    if selected_inverter != "All":
-        df_filtered = df_filtered[df_filtered["Inverter ID"].astype(str) == selected_inverter]
-
-    selected_status = st.selectbox("Fault Status", ["All", "OPEN", "CLOSED", ""])
-    if selected_status != "All":
-        df_filtered = df_filtered[df_filtered["Status"] == selected_status]
-
-    st.divider()
-    st.caption(f"{len(df_filtered)} of {len(df_master)} strings shown")
-
-# ── KPI row ──────────────────────────────────────────────────────────────
-total_strings = len(df_filtered)
-open_faults = int((df_filtered["Status"] == "OPEN").sum())
-closed_faults = int((df_filtered["Status"] == "CLOSED").sum())
-availability = ((total_strings - open_faults) / total_strings * 100) if total_strings else 0
-avg_tat = df_filtered.loc[df_filtered["Status"] == "CLOSED", "Turn Around Time"].mean()
-avg_open_age = df_filtered.loc[df_filtered["Status"] == "OPEN", "Present Failure Hours"].mean()
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("⚡ Availability", f"{availability:.2f}%")
-c2.metric("🔴 Open Faults", open_faults)
-c3.metric("🟢 Closed Faults", closed_faults)
-c4.metric("⏱️ Avg TAT", format_hours_to_hms(0 if pd.isna(avg_tat) else avg_tat))
-c5.metric("⏳ Avg Open Age", format_hours_to_hms(0 if pd.isna(avg_open_age) else avg_open_age))
-
-st.write("")
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Fault Analytics",
-    "🛠️ Failure / Rectified Entry",
-    "📝 Live Fault Editor",
-    "🔎 Search Faults",
-    "📦 Bulk Failure / Restore"
-])
-
-# ══════════════════════════════════════════════════════════════════════════
-# TAB 1 — ANALYTICS
-# ══════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════
-# TAB 1 — ANALYTICS
-# ══════════════════════════════════════════════════════════════════════════
-with tab1:
-    st.subheader("📊 Block-wise String Performance Summary")
-
-    string_key = ["Plot", "Block", "SACU", "Inverter ID", "String No"]
-
-    # Base unique strings for real-time total count
-    unique_strings_df = df_filtered.drop_duplicates(subset=string_key).copy()
-
-    # Current OPEN strings (unique physical strings currently open)
-    open_strings_df = (
-        df_filtered[df_filtered["Status"] == "OPEN"]
-        .drop_duplicates(subset=string_key)
-        .copy()
+    df["Total Active Strings"] = df.apply(
+        lambda row: get_total_active_strings(row.get(plot_col), row.get(block_col)),
+        axis=1
     )
 
-    # Historical CLOSED rows
-    closed_fault_rows_df = df_filtered[df_filtered["Status"] == "CLOSED"].copy()
-
-    # Unique restored strings
-    closed_unique_strings_df = (
-        df_filtered[df_filtered["Status"] == "CLOSED"]
-        .drop_duplicates(subset=string_key)
-        .copy()
-    )
-
-    # Calculate block-wise metrics
-    total_by_block = (
-        unique_strings_df.groupby("Block")
-        .size()
-        .reset_index(name="Total Strings")
-    )
-
-    open_by_block = (
-        open_strings_df.groupby("Block")
-        .size()
-        .reset_index(name="Open Faults")
-    )
-
-    closed_by_block = (
-        closed_unique_strings_df.groupby("Block")
-        .size()
-        .reset_index(name="Closed/Restored")
-    )
-
-    # If you want historical restored EVENT count instead, use this:
-    # closed_by_block = (
-    #     closed_fault_rows_df.groupby("Block")
-    #     .size()
-    #     .reset_index(name="Closed/Restored")
-    # )
-
-    block_summary = (
-        total_by_block
-        .merge(open_by_block, on="Block", how="left")
-        .merge(closed_by_block, on="Block", how="left")
-        .fillna(0)
-    )
-
-    block_summary["Total Strings"] = block_summary["Total Strings"].astype(int)
-    block_summary["Open Faults"] = block_summary["Open Faults"].astype(int)
-    block_summary["Closed/Restored"] = block_summary["Closed/Restored"].astype(int)
-
-    block_summary["Working Strings"] = (
-        block_summary["Total Strings"] - block_summary["Open Faults"]
-    )
-
-    block_summary["Availability %"] = np.where(
-        block_summary["Total Strings"] > 0,
-        ((block_summary["Working Strings"] / block_summary["Total Strings"]) * 100).round(2),
-        0.0
-    )
-
-    block_summary = block_summary.sort_values("Block").reset_index(drop=True)
-
-    if not block_summary.empty:
-        def style_block_table(val, col_name=None):
-            if col_name == "Open Faults" and val > 0:
-                return "background-color: #fde2e2; color: #b3261e; font-weight: 600;"
-            elif col_name == "Closed/Restored" and val > 0:
-                return "background-color: #dcf5e3; color: #1e7a3a; font-weight: 600;"
-            elif col_name == "Working Strings" and val > 0:
-                return "background-color: #e3f2fd; color: #0d47a1; font-weight: 600;"
-            elif col_name == "Availability %":
-                if val >= 90:
-                    return "background-color: #e8f5e9; color: #1e7a3a; font-weight: 600;"
-                elif val >= 70:
-                    return "background-color: #fff3e0; color: #e65100; font-weight: 600;"
-                else:
-                    return "background-color: #fde2e2; color: #b3261e; font-weight: 600;"
-            return ""
-
-        styled_block_table = (
-            block_summary.style
-            .map(lambda v: style_block_table(v, "Open Faults"), subset=["Open Faults"])
-            .map(lambda v: style_block_table(v, "Closed/Restored"), subset=["Closed/Restored"])
-            .map(lambda v: style_block_table(v, "Working Strings"), subset=["Working Strings"])
-            .map(lambda v: style_block_table(v, "Availability %"), subset=["Availability %"])
+    if pv_columns:
+        df["Working String Count"] = df.apply(
+            lambda row: calculate_working_string_count(row, pv_columns),
+            axis=1
         )
+    else:
+        df["Working String Count"] = 0
 
+    df["Failed String Count"] = (
+        df["Total Active Strings"] - df["Working String Count"]
+    ).clip(lower=0)
+
+    df["Availability (%)"] = (
+        (df["Working String Count"] / df["Total Active Strings"]) * 100
+    ).fillna(0).round(2)
+
+    df["Failure Percentage (%)"] = (
+        (df["Failed String Count"] / df["Total Active Strings"]) * 100
+    ).fillna(0).round(2)
+
+    return df
+
+def find_header_row_index(file_stream, sheet_name, possible_header_columns, max_rows_to_check=100):
+    file_stream.seek(0)
+    temp_df = pd.read_excel(
+        file_stream,
+        sheet_name=sheet_name,
+        header=None,
+        nrows=max_rows_to_check,
+        engine="openpyxl"
+    )
+
+    possible_headers_lower = [str(col).strip().lower() for col in possible_header_columns]
+
+    for i, row in temp_df.iterrows():
+        row_values = [str(val).strip() for val in row.dropna()]
+        row_values_lower = [v.lower() for v in row_values]
+
+        if any(col in row_values_lower for col in possible_headers_lower):
+            return i
+
+    return None
+
+def assign_manual_headers(df, manual_headers):
+    manual_headers = clean_manual_columns(manual_headers)
+
+    if len(df.columns) >= len(manual_headers):
+        df = df.iloc[:, :len(manual_headers)].copy()
+        df.columns = manual_headers
+    else:
+        df.columns = manual_headers[:len(df.columns)]
+
+    return df
+
+def read_sheet_with_fallback(file_stream, sheet_name):
+    header_row_index = find_header_row_index(file_stream, sheet_name, INVERTER_ID_COLS)
+
+    file_stream.seek(0)
+    if header_row_index is not None:
+        df = pd.read_excel(
+            file_stream,
+            sheet_name=sheet_name,
+            skiprows=header_row_index,
+            header=0,
+            engine="openpyxl"
+        )
+    else:
+        df = pd.read_excel(
+            file_stream,
+            sheet_name=sheet_name,
+            header=None,
+            engine="openpyxl"
+        )
+        df = assign_manual_headers(df, MANUAL_SCADA_COLUMNS)
+
+    return df
+
+def get_pv_string_columns(df):
+    """Get all PV string voltage and current columns"""
+    pv_voltage_cols = []
+    pv_current_cols = []
+    
+    for col in df.columns:
+        col_str = str(col).strip()
+        if col_str.startswith("PV-I"):
+            pv_current_cols.append(col)
+        elif col_str.startswith("PV") and col_str != "PV" and not col_str.startswith("PV-I"):
+            # Try to parse as PV voltage
+            try:
+                num = int(col_str[2:])
+                if 1 <= num <= 28:
+                    pv_voltage_cols.append(col)
+            except:
+                pass
+    
+    return pv_voltage_cols, pv_current_cols
+
+def get_string_health_color(value):
+    """Get color for string health based on current value"""
+    if pd.isna(value):
+        return "#64748b"  # Gray
+    if value > 5.0:
+        return "#10b981"  # Green - Excellent
+    elif value > 3.0:
+        return "#34d399"  # Light Green - Good
+    elif value > 1.5:
+        return "#fbbf24"  # Yellow - Fair
+    elif value > 0.5:
+        return "#f59e0b"  # Orange - Poor
+    else:
+        return "#ef4444"  # Red - Critical
+
+def get_column_header_color(value):
+    """Get color for column header based on working percentage"""
+    if pd.isna(value):
+        return "#64748b"
+    if value >= 80:
+        return "#10b981"  # Green
+    elif value >= 60:
+        return "#f59e0b"  # Yellow
+    elif value >= 40:
+        return "#f97316"  # Orange
+    else:
+        return "#ef4444"  # Red
+
+# ==========================================
+# 6. PARSER
+# ==========================================
+@st.cache_data(show_spinner="Processing SCADA workbook...", ttl=3600)
+def process_scada_excel_bytes(file_bytes):
+    file_stream = io.BytesIO(file_bytes)
+    excel_file = pd.ExcelFile(file_stream, engine="openpyxl")
+    processed_dfs = {}
+
+    for sheet_name in excel_file.sheet_names:
+        try:
+            df = read_sheet_with_fallback(file_stream, sheet_name)
+        except Exception:
+            continue
+
+        df.dropna(how="all", inplace=True)
+        df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed:", case=False, regex=True)]
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+
+        df_columns_lower_map = {str(c).strip().lower(): c for c in df.columns}
+        actual_inverter_col = None
+
+        for col in INVERTER_ID_COLS:
+            if col in df.columns:
+                actual_inverter_col = col
+                break
+            elif col.strip().lower() in df_columns_lower_map:
+                actual_inverter_col = df_columns_lower_map[col.strip().lower()]
+                break
+
+        if not actual_inverter_col:
+            continue
+
+        df["Plot"] = df[actual_inverter_col].apply(extract_plot)
+        df["Block"] = df[actual_inverter_col].apply(extract_block)
+        df["SACU"] = df[actual_inverter_col].apply(map_inverter_to_sacu)
+
+        df = apply_string_metrics(df, plot_col="Plot", block_col="Block")
+
+        preferred_columns = [
+            "Plot",
+            "Block",
+            actual_inverter_col,
+            "SACU",
+            "Total Active Strings",
+            "Working String Count",
+            "Failed String Count",
+            "Availability (%)",
+            "Failure Percentage (%)"
+        ]
+        remaining_cols = [c for c in df.columns if c not in preferred_columns]
+        final_columns = [c for c in preferred_columns if c in df.columns] + remaining_cols
+        df = df[final_columns]
+
+        processed_dfs[sheet_name] = df
+
+    return processed_dfs
+
+def create_excel_download(dataframes_dict):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for sheet_name, df in dataframes_dict.items():
+            safe_sheet_name = str(sheet_name)[:31]
+            df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# ==========================================
+# 7. UI - User Management
+# ==========================================
+def user_management_ui():
+    """Admin interface for user management"""
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("👥 User Management")
+    
+    users = load_users()
+    current_user = get_current_user()
+    
+    if current_user and current_user["role"] == "admin":
+        with st.sidebar.expander("Manage Users"):
+            st.write("### Create New User")
+            new_username = st.text_input("Username", key="new_user")
+            new_password = st.text_input("Password", type="password", key="new_pass")
+            new_role = st.selectbox("Role", ["engineer", "admin"], key="new_role")
+            
+            if st.button("Create User", key="create_user_btn"):
+                if new_username and new_password:
+                    if new_username in users:
+                        st.error("Username already exists!")
+                    else:
+                        users[new_username] = {
+                            "password": hashlib.sha256(new_password.encode()).hexdigest(),
+                            "role": new_role,
+                            "assigned_plots": ["P1", "P2", "P3"] if new_role == "engineer" else ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"],
+                            "created_at": datetime.now().isoformat()
+                        }
+                        save_users(users)
+                        st.success(f"User {new_username} created!")
+                        st.rerun()
+            
+            st.write("### Existing Users")
+            for username, user_data in users.items():
+                if username != current_user.get("username"):
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    with col1:
+                        st.write(f"**{username}** ({user_data['role']})")
+                    with col2:
+                        if st.button(f"Delete", key=f"del_{username}"):
+                            del users[username]
+                            save_users(users)
+                            st.rerun()
+                    with col3:
+                        if user_data["role"] == "engineer":
+                            if st.button(f"Assign Plots", key=f"assign_{username}"):
+                                st.session_state.assign_user = username
+                                st.rerun()
+            
+            # Plot assignment interface
+            if "assign_user" in st.session_state:
+                username = st.session_state.assign_user
+                user_data = users.get(username)
+                if user_data:
+                    st.write(f"### Assign Plots for {username}")
+                    available_plots = ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"]
+                    assigned = user_data.get("assigned_plots", [])
+                    
+                    selected_plots = st.multiselect(
+                        f"Select plots for {username}",
+                        options=available_plots,
+                        default=assigned
+                    )
+                    
+                    if st.button("Save Assignments"):
+                        users[username]["assigned_plots"] = selected_plots
+                        save_users(users)
+                        st.success(f"Plots assigned for {username}")
+                        del st.session_state.assign_user
+                        st.rerun()
+                    
+                    if st.button("Cancel"):
+                        del st.session_state.assign_user
+                        st.rerun()
+    else:
+        st.sidebar.info("Admin access required for user management")
+
+# ==========================================
+# 8. UI - Main Tabs
+# ==========================================
+
+# ==========================================
+# 8. UI - Main Tabs (UPDATED)
+# ==========================================
+def create_pv_string_tab(df):
+    """Create the inverter-wise PV string details tab"""
+    st.subheader("🔌 Inverter-wise PV String Details")
+    st.caption("Color-coded headers show string health status")
+    
+    # Find the actual inverter column
+    inverter_col = None
+    df_columns_lower_map = {str(c).strip().lower(): c for c in df.columns}
+    
+    for col in INVERTER_ID_COLS:
+        if col in df.columns:
+            inverter_col = col
+            break
+        elif col.strip().lower() in df_columns_lower_map:
+            inverter_col = df_columns_lower_map[col.strip().lower()]
+            break
+    
+    if not inverter_col:
+        st.warning("No inverter ID column found in the dataset")
+        return
+    
+    # Get PV string columns
+    pv_voltage_cols, pv_current_cols = get_pv_string_columns(df)
+    
+    if not pv_voltage_cols and not pv_current_cols:
+        st.warning("No PV string data columns found in the dataset")
+        return
+    
+    # Filter controls
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        available_plots = sorted(df["Plot"].unique())
+        selected_plot = st.selectbox("Filter by Plot", ["All"] + available_plots, key="pv_plot_filter")
+    
+    with col2:
+        filtered_by_plot = df if selected_plot == "All" else df[df["Plot"] == selected_plot]
+        available_blocks = sorted(filtered_by_plot["Block"].unique())
+        selected_block = st.selectbox("Filter by Block", ["All"] + available_blocks, key="pv_block_filter")
+    
+    with col3:
+        filtered_by_block = filtered_by_plot if selected_block == "All" else filtered_by_plot[filtered_by_plot["Block"] == selected_block]
+        available_sacus = sorted(filtered_by_block["SACU"].unique())
+        selected_sacu = st.selectbox("Filter by SACU", ["All"] + available_sacus, key="pv_sacu_filter")
+    
+    with col4:
+        filtered_by_sacu = filtered_by_block if selected_sacu == "All" else filtered_by_block[filtered_by_block["SACU"] == selected_sacu]
+        available_inverters = sorted(filtered_by_sacu[inverter_col].unique())
+        selected_inverter = st.selectbox("Filter by Inverter", ["All"] + available_inverters, key="pv_inverter_filter")
+    
+    with col5:
+        show_voltage = st.checkbox("Show Voltage", value=False, key="show_voltage")
+        show_current = st.checkbox("Show Current", value=True, key="show_current")
+    
+    # Filter data
+    filtered_df = df.copy()
+    if selected_plot != "All":
+        filtered_df = filtered_df[filtered_df["Plot"] == selected_plot]
+    if selected_block != "All":
+        filtered_df = filtered_df[filtered_df["Block"] == selected_block]
+    if selected_sacu != "All":
+        filtered_df = filtered_df[filtered_df["SACU"] == selected_sacu]
+    if selected_inverter != "All":
+        filtered_df = filtered_df[filtered_df[inverter_col] == selected_inverter]
+    
+    if filtered_df.empty:
+        st.warning("No data available for the selected filters")
+        return
+    
+    # Calculate summary metrics for each inverter using existing calculations
+    summary_metrics = []
+    for idx, row in filtered_df.iterrows():
+        inverter_id = row[inverter_col]
+        plot = row.get("Plot", "")
+        block = row.get("Block", "")
+        sacu = row.get("SACU", "")
+        
+        # Use pre-calculated metrics if available
+        if "Total Active Strings" in row and "Working String Count" in row:
+            total_strings = int(row["Total Active Strings"]) if pd.notna(row["Total Active Strings"]) else 0
+            working_strings = int(row["Working String Count"]) if pd.notna(row["Working String Count"]) else 0
+            failed_strings = int(row["Failed String Count"]) if pd.notna(row["Failed String Count"]) else 0
+            availability = row["Availability (%)"] if pd.notna(row["Availability (%)"]) else 0
+        else:
+            # Fallback: Calculate manually
+            total_strings = 0
+            working_strings = 0
+            failed_strings = 0
+            
+            for col in pv_current_cols:
+                if col in row and pd.notna(row[col]):
+                    total_strings += 1
+                    if row[col] > WORKING_CURRENT_THRESHOLD:
+                        working_strings += 1
+                    else:
+                        failed_strings += 1
+            
+            availability = (working_strings / total_strings * 100) if total_strings > 0 else 0
+        
+        # Get additional metrics if available
+        grid = row.get("Grid", "")
+        e_daily = row.get("E-Daily(KWH)", "")
+        active_power = row.get("Active Power", "")
+        reactive_power = row.get("Reactive Power", "")
+        
+        # Get PV voltages summary
+        voltage_values = []
+        for col in pv_voltage_cols:
+            if col in row and pd.notna(row[col]):
+                voltage_values.append(row[col])
+        
+        avg_voltage = sum(voltage_values) / len(voltage_values) if voltage_values else 0
+        min_voltage = min(voltage_values) if voltage_values else 0
+        max_voltage = max(voltage_values) if voltage_values else 0
+        
+        # Get PV current summary
+        current_values = []
+        for col in pv_current_cols:
+            if col in row and pd.notna(row[col]):
+                current_values.append(row[col])
+        
+        avg_current = sum(current_values) / len(current_values) if current_values else 0
+        
+        # Calculate string health status
+        health_status = "Excellent" if availability >= 90 else "Good" if availability >= 70 else "Fair" if availability >= 50 else "Poor"
+        
+        summary_metrics.append({
+            "Inverter ID": inverter_id,
+            "Plot": plot,
+            "Block": block,
+            "SACU": sacu,
+            "Total Strings": total_strings,
+            "Working Strings": working_strings,
+            "Failed Strings": failed_strings,
+            "Availability (%)": round(availability, 2),
+            "Health Status": health_status,
+            "Avg PV Voltage (V)": round(avg_voltage, 1),
+            "Avg PV Current (A)": round(avg_current, 2),
+            "Grid": grid,
+            "E-Daily (KWH)": e_daily,
+            "Active Power (KW)": active_power,
+            "Reactive Power (KVAR)": reactive_power
+        })
+    
+    summary_df = pd.DataFrame(summary_metrics)
+    
+    # Display summary cards
+    st.markdown("### 📊 Inverter Summary")
+    
+    # Show total metrics
+    total_inverters = len(summary_df)
+    total_working = summary_df["Working Strings"].sum()
+    total_strings_all = summary_df["Total Strings"].sum()
+    total_failed = summary_df["Failed Strings"].sum()
+    overall_availability = (total_working / total_strings_all * 100) if total_strings_all > 0 else 0
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Total Inverters", total_inverters)
+    col2.metric("Total Strings", total_strings_all)
+    col3.metric("Working Strings", total_working)
+    col4.metric("Failed Strings", total_failed)
+    col5.metric("Overall Availability", f"{overall_availability:.1f}%")
+    
+    st.markdown("---")
+    
+    # Display summary table with color coding
+    st.subheader("📋 Inverter-wise Summary")
+    
+    # Color code the summary table
+    def color_availability(val):
+        if isinstance(val, (int, float)):
+            if val >= 90:
+                return 'background-color: #10b981; color: white; font-weight: bold'
+            elif val >= 70:
+                return 'background-color: #34d399; color: white; font-weight: bold'
+            elif val >= 50:
+                return 'background-color: #fbbf24; color: black; font-weight: bold'
+            elif val >= 30:
+                return 'background-color: #f59e0b; color: white; font-weight: bold'
+            else:
+                return 'background-color: #ef4444; color: white; font-weight: bold'
+        return ''
+    
+    def color_health_status(val):
+        if val == "Excellent":
+            return 'background-color: #10b981; color: white; font-weight: bold'
+        elif val == "Good":
+            return 'background-color: #34d399; color: white; font-weight: bold'
+        elif val == "Fair":
+            return 'background-color: #fbbf24; color: black; font-weight: bold'
+        elif val == "Poor":
+            return 'background-color: #ef4444; color: white; font-weight: bold'
+        return ''
+    
+    def color_failed_strings(val):
+        if isinstance(val, (int, float)):
+            if val == 0:
+                return 'background-color: #10b981; color: white; font-weight: bold'
+            elif val <= 2:
+                return 'background-color: #fbbf24; color: black; font-weight: bold'
+            elif val <= 5:
+                return 'background-color: #f59e0b; color: white; font-weight: bold'
+            else:
+                return 'background-color: #ef4444; color: white; font-weight: bold'
+        return ''
+    
+    # Apply styling to summary table
+    styled_summary = summary_df.style.map(color_availability, subset=['Availability (%)'])
+    styled_summary = styled_summary.map(color_health_status, subset=['Health Status'])
+    styled_summary = styled_summary.map(color_failed_strings, subset=['Failed Strings'])
+    
+    # Format numeric columns
+    styled_summary = styled_summary.format({
+        'Availability (%)': '{:.1f}%',
+        'Avg PV Voltage (V)': '{:.1f}',
+        'Avg PV Current (A)': '{:.2f}'
+    })
+    
+    st.dataframe(styled_summary, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Display detailed PV string data
+    st.subheader("🔌 Detailed PV String Data")
+    st.caption("Green = Good (>5A), Yellow = Fair (1.5-5A), Orange = Poor (0.5-1.5A), Red = Critical (<0.5A)")
+    
+    # Prepare display dataframe for detailed view
+    display_cols = [inverter_col, "Plot", "Block", "SACU"]
+    
+    # Add pre-calculated metrics if available
+    if "Total Active Strings" in filtered_df.columns:
+        display_cols.append("Total Active Strings")
+    if "Working String Count" in filtered_df.columns:
+        display_cols.append("Working String Count")
+    if "Failed String Count" in filtered_df.columns:
+        display_cols.append("Failed String Count")
+    if "Availability (%)" in filtered_df.columns:
+        display_cols.append("Availability (%)")
+    if "Failure Percentage (%)" in filtered_df.columns:
+        display_cols.append("Failure Percentage (%)")
+    
+    # Add additional useful columns if available
+    additional_cols = ["Grid", "E-Daily(KWH)", "Active Power", "Reactive Power", "VAB", "VBC", "VCA", "IA", "IB", "IC"]
+    for col in additional_cols:
+        if col in filtered_df.columns:
+            display_cols.append(col)
+    
+    # Add PV columns based on selection
+    pv_columns_to_show = []
+    if show_voltage:
+        pv_columns_to_show.extend(sorted(pv_voltage_cols))
+    if show_current:
+        pv_columns_to_show.extend(sorted(pv_current_cols))
+    
+    display_cols.extend(pv_columns_to_show)
+    
+    # Create display dataframe
+    display_df = filtered_df[display_cols].copy()
+    
+    # Rename columns for better display
+    rename_map = {inverter_col: "Inverter ID"}
+    if "E-Daily(KWH)" in display_df.columns:
+        rename_map["E-Daily(KWH)"] = "Energy (KWh)"
+    if "Active Power" in display_df.columns:
+        rename_map["Active Power"] = "Active Power (KW)"
+    if "Reactive Power" in display_df.columns:
+        rename_map["Reactive Power"] = "Reactive Power (KVAR)"
+    if "Total Active Strings" in display_df.columns:
+        rename_map["Total Active Strings"] = "Total Strings"
+    if "Working String Count" in display_df.columns:
+        rename_map["Working String Count"] = "Working"
+    if "Failed String Count" in display_df.columns:
+        rename_map["Failed String Count"] = "Failed"
+    if "Failure Percentage (%)" in display_df.columns:
+        rename_map["Failure Percentage (%)"] = "Failure %"
+    if "VAB" in display_df.columns:
+        rename_map["VAB"] = "VAB (V)"
+    if "VBC" in display_df.columns:
+        rename_map["VBC"] = "VBC (V)"
+    if "VCA" in display_df.columns:
+        rename_map["VCA"] = "VCA (V)"
+    if "IA" in display_df.columns:
+        rename_map["IA"] = "IA (A)"
+    if "IB" in display_df.columns:
+        rename_map["IB"] = "IB (A)"
+    if "IC" in display_df.columns:
+        rename_map["IC"] = "IC (A)"
+    
+    display_df = display_df.rename(columns=rename_map)
+    
+    # Update pv columns list for styling
+    pv_current_cols_display = []
+    pv_voltage_cols_display = []
+    
+    for col in pv_current_cols:
+        if col in display_df.columns:
+            pv_current_cols_display.append(col)
+    
+    for col in pv_voltage_cols:
+        if col in display_df.columns:
+            pv_voltage_cols_display.append(col)
+    
+    # Add color coding to headers and cells
+    def apply_detailed_styling(df_display):
+        styled = df_display.style
+        
+        # Color code PV column headers based on data health
+        for col in pv_columns_to_show:
+            if col in df_display.columns:
+                # Calculate percentage of strings working for this column
+                non_null = df_display[col].notna().sum()
+                if non_null > 0:
+                    working_count = (df_display[col] > WORKING_CURRENT_THRESHOLD).sum()
+                    working_pct = (working_count / non_null) * 100
+                    color = get_column_header_color(working_pct)
+                    styled = styled.set_table_styles(
+                        [{'selector': f'th.col{df_display.columns.get_loc(col)}',
+                          'props': [('background-color', color), ('color', 'white'), ('font-weight', 'bold')]}],
+                        overwrite=False
+                    )
+        
+        # Color code cell values for PV current columns
+        for col in pv_current_cols_display:
+            if col in df_display.columns:
+                styled = styled.map(
+                    lambda x: f'background-color: {get_string_health_color(x)}; color: white; font-weight: bold;' 
+                    if pd.notna(x) and isinstance(x, (int, float)) else '',
+                    subset=[col]
+                )
+        
+        # Color code Availability column
+        if "Availability (%)" in df_display.columns:
+            styled = styled.map(color_availability, subset=['Availability (%)'])
+        
+        # Color code Failed strings column
+        if "Failed" in df_display.columns:
+            styled = styled.map(color_failed_strings, subset=['Failed'])
+        
+        # Add column width styling
+        styled = styled.set_table_styles([
+            {'selector': 'thead th', 'props': [('position', 'sticky'), ('top', '0'), ('z-index', '999')]},
+            {'selector': 'td', 'props': [('padding', '2px 4px'), ('font-size', '12px')]},
+            {'selector': 'th', 'props': [('padding', '4px 8px'), ('font-size', '11px')]}
+        ], overwrite=False)
+        
+        return styled
+    
+    # Display the styled dataframe
+    if not display_df.empty:
+        try:
+            styled_df = apply_detailed_styling(display_df)
+            st.dataframe(styled_df, use_container_width=True, height=400)
+        except Exception as e:
+            # Fallback to unstyled dataframe if styling fails
+            st.warning(f"Styling error: {str(e)}. Showing unstyled data.")
+            st.dataframe(display_df, use_container_width=True, height=400)
+        
+        # Individual inverter view
+        st.markdown("---")
+        st.subheader("🔍 Individual Inverter Analysis")
+        
+        # Let user select a specific inverter for detailed view
+        inverter_list = sorted(filtered_df[inverter_col].unique())
+        selected_single_inverter = st.selectbox("Select Inverter for Detailed View", inverter_list, key="single_inverter_view")
+        
+        if selected_single_inverter:
+            inverter_data = filtered_df[filtered_df[inverter_col] == selected_single_inverter].iloc[0]
+            
+            # Display inverter details in columns
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            with col1:
+                st.metric("Inverter", inverter_data[inverter_col])
+            with col2:
+                st.metric("Plot", inverter_data.get("Plot", "N/A"))
+            with col3:
+                st.metric("Block", inverter_data.get("Block", "N/A"))
+            with col4:
+                st.metric("SACU", inverter_data.get("SACU", "N/A"))
+            with col5:
+                # Use pre-calculated availability if available
+                if "Availability (%)" in inverter_data and pd.notna(inverter_data["Availability (%)"]):
+                    availability = inverter_data["Availability (%)"]
+                else:
+                    # Calculate manually
+                    working = 0
+                    total = 0
+                    for col in pv_current_cols:
+                        if col in inverter_data and pd.notna(inverter_data[col]):
+                            total += 1
+                            if inverter_data[col] > WORKING_CURRENT_THRESHOLD:
+                                working += 1
+                    availability = (working / total * 100) if total > 0 else 0
+                st.metric("Availability", f"{availability:.1f}%")
+            with col6:
+                # Show string status
+                if "Failed String Count" in inverter_data and pd.notna(inverter_data["Failed String Count"]):
+                    failed = int(inverter_data["Failed String Count"])
+                    st.metric("Failed Strings", failed)
+            
+            # Show string status visualization
+            st.markdown("#### PV String Status")
+            
+            # Create columns for each string
+            cols_per_row = 8
+            for i in range(0, len(pv_current_cols), cols_per_row):
+                string_cols = st.columns(cols_per_row)
+                for idx, col in enumerate(pv_current_cols[i:i+cols_per_row]):
+                    if col in inverter_data:
+                        value = inverter_data[col]
+                        if pd.notna(value):
+                            status = "Working" if value > WORKING_CURRENT_THRESHOLD else "Failed"
+                            color = "#10b981" if value > WORKING_CURRENT_THRESHOLD else "#ef4444"
+                            with string_cols[idx]:
+                                st.markdown(f"""
+                                <div style='background-color: {color}; padding: 8px; border-radius: 5px; text-align: center; color: white; margin: 2px;'>
+                                    <div style='font-size: 10px;'>{col}</div>
+                                    <div style='font-size: 14px; font-weight: bold;'>{value:.1f}A</div>
+                                    <div style='font-size: 9px;'>{status}</div>
+                                </div>
+                                """, unsafe_allow_html=True)
+            
+            # Additional inverter metrics if available
+            st.markdown("#### Additional Metrics")
+            metric_cols = st.columns(4)
+            
+            additional_metrics = [
+                ("Grid", "Grid"),
+                ("E-Daily(KWH)", "Energy (KWh)"),
+                ("Active Power", "Active Power (KW)"),
+                ("Reactive Power", "Reactive Power (KVAR)")
+            ]
+            
+            for idx, (col, label) in enumerate(additional_metrics):
+                if col in inverter_data and pd.notna(inverter_data[col]):
+                    with metric_cols[idx]:
+                        st.metric(label, f"{inverter_data[col]:.2f}" if isinstance(inverter_data[col], (int, float)) else inverter_data[col])
+            
+            # Show voltage summary
+            if pv_voltage_cols:
+                st.markdown("#### PV Voltage Summary")
+                voltage_values = []
+                for col in pv_voltage_cols:
+                    if col in inverter_data and pd.notna(inverter_data[col]):
+                        voltage_values.append(inverter_data[col])
+                
+                if voltage_values:
+                    vol_cols = st.columns(4)
+                    vol_cols[0].metric("Average Voltage", f"{sum(voltage_values)/len(voltage_values):.1f}V")
+                    vol_cols[1].metric("Min Voltage", f"{min(voltage_values):.1f}V")
+                    vol_cols[2].metric("Max Voltage", f"{max(voltage_values):.1f}V")
+                    vol_cols[3].metric("Voltage Differential", f"{max(voltage_values)-min(voltage_values):.1f}V")
+            
+            # Show grid metrics if available
+            if "VAB" in inverter_data and "VBC" in inverter_data and "VCA" in inverter_data:
+                st.markdown("#### Grid Voltage")
+                grid_cols = st.columns(3)
+                grid_cols[0].metric("VAB", f"{inverter_data['VAB']:.1f}V" if pd.notna(inverter_data['VAB']) else "N/A")
+                grid_cols[1].metric("VBC", f"{inverter_data['VBC']:.1f}V" if pd.notna(inverter_data['VBC']) else "N/A")
+                grid_cols[2].metric("VCA", f"{inverter_data['VCA']:.1f}V" if pd.notna(inverter_data['VCA']) else "N/A")
+            
+            if "IA" in inverter_data and "IB" in inverter_data and "IC" in inverter_data:
+                st.markdown("#### Grid Current")
+                grid_cols = st.columns(3)
+                grid_cols[0].metric("IA", f"{inverter_data['IA']:.1f}A" if pd.notna(inverter_data['IA']) else "N/A")
+                grid_cols[1].metric("IB", f"{inverter_data['IB']:.1f}A" if pd.notna(inverter_data['IB']) else "N/A")
+                grid_cols[2].metric("IC", f"{inverter_data['IC']:.1f}A" if pd.notna(inverter_data['IC']) else "N/A")
+    else:
+        st.info("No PV string data available for the selected filters")
+
+# def main_dashboard_tab(df):
+#     """Main dashboard tab"""
+#     st.title("Solar PV String Availability Dashboard")
+#     st.caption(f"Inverters: {len(df)}")
+    
+#     # Find the actual inverter column for display
+#     inverter_col = None
+#     df_columns_lower_map = {str(c).strip().lower(): c for c in df.columns}
+    
+#     for col in INVERTER_ID_COLS:
+#         if col in df.columns:
+#             inverter_col = col
+#             break
+#         elif col.strip().lower() in df_columns_lower_map:
+#             inverter_col = df_columns_lower_map[col.strip().lower()]
+#             break
+    
+#     # KPIs
+#     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    
+#     total_inverters = df[inverter_col].nunique() if inverter_col and inverter_col in df.columns else 0
+#     total_strings = int(df["Total Active Strings"].sum()) if "Total Active Strings" in df.columns else 0
+#     working_strings = int(df["Working String Count"].sum()) if "Working String Count" in df.columns else 0
+#     failed_strings = int(df["Failed String Count"].sum()) if "Failed String Count" in df.columns else 0
+#     overall_availability = round((working_strings / total_strings) * 100, 2) if total_strings > 0 else 0.0
+    
+#     kpi1.metric("Total Inverters", f"{total_inverters:,}")
+#     kpi2.metric("Total Active Strings", f"{total_strings:,}")
+#     kpi3.metric("Working Strings", f"{working_strings:,}")
+#     kpi4.metric("Failed Strings", f"{failed_strings:,}")
+#     kpi5.metric("Availability", f"{overall_availability:.2f}%")
+    
+#     st.markdown("---")
+    
+#     col1, col2 = st.columns(2)
+    
+#     with col1:
+#         st.subheader("Block-wise Strings")
+#         if not df.empty:
+#             block_summary = df.groupby("Block", as_index=False).agg(
+#                 Total_Active_Strings=("Total Active Strings", "sum"),
+#                 Working_String_Count=("Working String Count", "sum"),
+#                 Failed_String_Count=("Failed String Count", "sum")
+#             )
+#             fig_bar = px.bar(
+#                 block_summary,
+#                 x="Block",
+#                 y=["Working_String_Count", "Failed_String_Count"],
+#                 barmode="stack",
+#                 color_discrete_map={
+#                     "Working_String_Count": "#10b981",
+#                     "Failed_String_Count": "#ef4444"
+#                 }
+#             )
+#             fig_bar.update_layout(height=400)
+#             st.plotly_chart(fig_bar, use_container_width=True)
+#         else:
+#             st.warning("No records available for the selected filters.")
+    
+#     with col2:
+#         st.subheader("String Health")
+#         fig_pie = go.Figure(data=[go.Pie(
+#             labels=["Working Strings", "Failed Strings"],
+#             values=[working_strings, failed_strings],
+#             hole=0.55,
+#             marker_colors=["#10b981", "#ef4444"]
+#         )])
+#         fig_pie.update_layout(height=400)
+#         st.plotly_chart(fig_pie, use_container_width=True)
+    
+#     st.markdown("---")
+#     st.subheader("Block Summary")
+    
+#     if not df.empty:
+#         block_table = df.groupby("Block", as_index=False).agg(
+#             Total_Inverters=(inverter_col if inverter_col else df.columns[0], "nunique"),
+#             Total_Active_Strings=("Total Active Strings", "sum"),
+#             Total_Working_Strings=("Working String Count", "sum"),
+#             Total_Failed_Strings=("Failed String Count", "sum")
+#         )
+#         block_table["Availability (%)"] = (
+#             (block_table["Total_Working_Strings"] / block_table["Total_Active_Strings"]) * 100
+#         ).fillna(0).round(2)
+#         block_table["Failure Percentage (%)"] = (
+#             (block_table["Total_Failed_Strings"] / block_table["Total_Active_Strings"]) * 100
+#         ).fillna(0).round(2)
+        
+#         st.dataframe(block_table, use_container_width=True)
+#     else:
+#         st.warning("No block summary available.")
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def calculate_plot_summary(df, inverter_col):
+    """Calculate plot-wise summary with caching"""
+    if df.empty:
+        return pd.DataFrame()
+    
+    plot_summary = df.groupby("Plot", as_index=False).agg(
+        Total_Inverters=(inverter_col if inverter_col else df.columns[0], "nunique"),
+        Total_Active_Strings=("Total Active Strings", "sum"),
+        Total_Working_Strings=("Working String Count", "sum"),
+        Total_Failed_Strings=("Failed String Count", "sum")
+    )
+    
+    plot_summary["Availability (%)"] = (
+        (plot_summary["Total_Working_Strings"] / plot_summary["Total_Active_Strings"]) * 100
+    ).fillna(0).round(2)
+    
+    plot_summary["Failure Percentage (%)"] = (
+        (plot_summary["Total_Failed_Strings"] / plot_summary["Total_Active_Strings"]) * 100
+    ).fillna(0).round(2)
+    
+    plot_summary["Health Status"] = plot_summary["Availability (%)"].apply(
+        lambda x: "🟢 Excellent" if x >= 90 else "🟡 Good" if x >= 70 else "🟠 Fair" if x >= 50 else "🔴 Poor"
+    )
+    
+    # Add Block count per plot
+    block_count = df.groupby("Plot")["Block"].nunique().reset_index(name="Total_Blocks")
+    plot_summary = plot_summary.merge(block_count, on="Plot", how="left")
+    
+    return plot_summary
+
+@st.cache_data(ttl=300)
+def create_plot_charts(plot_summary):
+    """Create all charts with caching - Plot wise"""
+    charts = {}
+    
+    # 1. Stacked Bar Chart - Working vs Failed by Plot
+    fig_bar = px.bar(
+        plot_summary,
+        x="Plot",
+        y=["Total_Working_Strings", "Total_Failed_Strings"],
+        barmode="stack",
+        title="📊 Plot-wise String Status",
+        labels={
+            "value": "Number of Strings",
+            "Plot": "Plot",
+            "variable": "Status"
+        },
+        color_discrete_map={
+            "Total_Working_Strings": "#10b981",
+            "Total_Failed_Strings": "#ef4444"
+        },
+        text_auto=True
+    )
+    fig_bar.update_layout(
+        height=450,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=12)
+    )
+    fig_bar.update_traces(
+        textfont_size=12,
+        textposition="inside",
+        insidetextanchor="middle"
+    )
+    # Format y-axis to show full numbers without k - Fixed: update_yaxes
+    fig_bar.update_yaxes(
+        tickformat=",.0f",
+        tickprefix="",
+        ticksuffix=""
+    )
+    charts["bar"] = fig_bar
+    
+    # 2. Horizontal Bar Chart - Availability by Plot
+    plot_summary_sorted = plot_summary.sort_values("Availability (%)", ascending=True)
+    
+    fig_avail = px.bar(
+        plot_summary_sorted,
+        x="Availability (%)",
+        y="Plot",
+        orientation="h",
+        title="📈 Plot-wise Availability (%)",
+        labels={
+            "Availability (%)": "Availability (%)",
+            "Plot": "Plot"
+        },
+        color="Availability (%)",
+        color_continuous_scale=[
+            [0, "#ef4444"],
+            [0.3, "#f59e0b"],
+            [0.5, "#fbbf24"],
+            [0.7, "#34d399"],
+            [1, "#10b981"]
+        ],
+        range_color=[0, 100],
+        text_auto=".1f"
+    )
+    fig_avail.update_layout(
+        height=400,
+        hovermode="y unified",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=12),
+        coloraxis_showscale=False,
+        xaxis=dict(range=[0, 105])
+    )
+    fig_avail.update_traces(
+        textposition="outside",
+        textfont_size=12
+    )
+    charts["availability"] = fig_avail
+    
+    # 3. Donut Chart - Overall Health
+    total_working = plot_summary["Total_Working_Strings"].sum()
+    total_failed = plot_summary["Total_Failed_Strings"].sum()
+    
+    fig_donut = go.Figure(data=[go.Pie(
+        labels=["✅ Working Strings", "❌ Failed Strings"],
+        values=[total_working, total_failed],
+        hole=0.6,
+        marker_colors=["#10b981", "#ef4444"],
+        textinfo="label+percent",
+        textposition="auto",
+        pull=[0.05, 0]
+    )])
+    fig_donut.update_layout(
+        height=400,
+        title="🎯 Overall String Health",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=12),
+        annotations=[dict(
+            text=f"<b>{total_working + total_failed:,}</b><br>Total Strings",
+            x=0.5, y=0.5,
+            font_size=16,
+            showarrow=False
+        )]
+    )
+    charts["donut"] = fig_donut
+    
+    # 4. Scatter Plot - Inverters vs Strings by Plot
+    fig_scatter = px.scatter(
+        plot_summary,
+        x="Total_Inverters",
+        y="Total_Active_Strings",
+        size="Total_Active_Strings",
+        color="Availability (%)",
+        text="Plot",
+        title="📍 Plot Distribution: Inverters vs Strings",
+        labels={
+            "Total_Inverters": "Number of Inverters",
+            "Total_Active_Strings": "Total Strings",
+            "Availability (%)": "Availability"
+        },
+        color_continuous_scale=[
+            [0, "#ef4444"],
+            [0.3, "#f59e0b"],
+            [0.5, "#fbbf24"],
+            [0.7, "#34d399"],
+            [1, "#10b981"]
+        ],
+        range_color=[0, 100],
+        size_max=60
+    )
+    fig_scatter.update_traces(
+        textposition="top center",
+        marker=dict(line=dict(width=1, color='white'))
+    )
+    fig_scatter.update_layout(
+        height=400,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=12),
+        hovermode="closest"
+    )
+    # Format axes to show full numbers without k - Fixed: update_xaxes and update_yaxes
+    fig_scatter.update_xaxes(
+        tickformat=",.0f",
+        tickprefix="",
+        ticksuffix=""
+    )
+    fig_scatter.update_yaxes(
+        tickformat=",.0f",
+        tickprefix="",
+        ticksuffix=""
+    )
+    charts["scatter"] = fig_scatter
+    
+    # 5. Treemap - Plot Distribution
+    fig_treemap = px.treemap(
+        plot_summary,
+        path=["Plot"],
+        values="Total_Active_Strings",
+        color="Availability (%)",
+        color_continuous_scale=[
+            [0, "#ef4444"],
+            [0.3, "#f59e0b"],
+            [0.5, "#fbbf24"],
+            [0.7, "#34d399"],
+            [1, "#10b981"]
+        ],
+        range_color=[0, 100],
+        title="🎨 String Distribution by Plot",
+        hover_data={
+            "Total_Active_Strings": True,
+            "Total_Working_Strings": True,
+            "Total_Failed_Strings": True,
+            "Total_Inverters": True,
+            "Total_Blocks": True,
+            "Availability (%)": ":.1f%"
+        }
+    )
+    fig_treemap.update_traces(
+        textinfo="label+value",
+        textfont_size=14,
+        marker=dict(cornerradius=4),
+        hovertemplate='<b>%{label}</b><br>' +
+                      'Total Strings: %{value:,.0f}<br>' +
+                      'Availability: %{color:,.1f}%<extra></extra>'
+    )
+    fig_treemap.update_layout(
+        height=400,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=12),
+        coloraxis_showscale=False
+    )
+    charts["treemap"] = fig_treemap
+    
+    return charts
+
+def display_plot_metrics(plot_summary):
+    """Display plot-wise metric cards"""
+    st.subheader("📊 Plot-wise Performance Overview")
+    
+    # Create metric cards for each plot
+    cols = st.columns(min(4, len(plot_summary)))
+    
+    for idx, (_, row) in enumerate(plot_summary.iterrows()):
+        if idx >= 4:
+            break
+        
+        col_idx = idx % 4
+        with cols[col_idx]:
+            # Determine color based on availability
+            avail = row["Availability (%)"]
+            if avail >= 90:
+                status_color = "#10b981"
+                status_icon = "🟢"
+                status_text = "Excellent"
+            elif avail >= 70:
+                status_color = "#34d399"
+                status_icon = "🟡"
+                status_text = "Good"
+            elif avail >= 50:
+                status_color = "#fbbf24"
+                status_icon = "🟠"
+                status_text = "Fair"
+            else:
+                status_color = "#ef4444"
+                status_icon = "🔴"
+                status_text = "Poor"
+            
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border: 2px solid {status_color}; border-radius: 12px; padding: 15px; margin: 5px 0;'>
+                <div style='display: flex; justify-content: space-between; align-items: center;'>
+                    <h3 style='margin: 0; color: #f1f5f9;'>{row['Plot']}</h3>
+                    <span style='font-size: 24px;'>{status_icon}</span>
+                </div>
+                <div style='margin-top: 8px;'>
+                    <div style='display: flex; justify-content: space-between;'>
+                        <span style='color: #94a3b8; font-size: 12px;'>Status</span>
+                        <span style='color: {status_color}; font-weight: bold; font-size: 14px;'>{status_text}</span>
+                    </div>
+                    <div style='display: flex; justify-content: space-between; margin-top: 4px;'>
+                        <span style='color: #94a3b8; font-size: 12px;'>Inverters</span>
+                        <span style='color: #f1f5f9; font-weight: bold;'>{int(row['Total_Inverters']):,}</span>
+                    </div>
+                    <div style='display: flex; justify-content: space-between;'>
+                        <span style='color: #94a3b8; font-size: 12px;'>Total Strings</span>
+                        <span style='color: #f1f5f9; font-weight: bold;'>{int(row['Total_Active_Strings']):,}</span>
+                    </div>
+                    <div style='display: flex; justify-content: space-between;'>
+                        <span style='color: #94a3b8; font-size: 12px;'>✅ Working</span>
+                        <span style='color: #10b981; font-weight: bold;'>{int(row['Total_Working_Strings']):,}</span>
+                    </div>
+                    <div style='display: flex; justify-content: space-between; margin-bottom: 8px;'>
+                        <span style='color: #94a3b8; font-size: 12px;'>❌ Failed</span>
+                        <span style='color: #ef4444; font-weight: bold;'>{int(row['Total_Failed_Strings']):,}</span>
+                    </div>
+                    <div style='background-color: #1e293b; height: 8px; border-radius: 4px; overflow: hidden;'>
+                        <div style='background: linear-gradient(90deg, {status_color}, {status_color}88); width: {avail}%; height: 100%;'></div>
+                    </div>
+                    <div style='display: flex; justify-content: space-between; margin-top: 4px;'>
+                        <span style='color: #94a3b8; font-size: 11px;'>Availability</span>
+                        <span style='color: {status_color}; font-weight: bold; font-size: 16px;'>{avail:.1f}%</span>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+def main_dashboard_tab(df):
+    """Main dashboard tab with Plot-wise visualizations"""
+    st.title("☀️ Solar PV String Availability Dashboard")
+    
+    # Find the actual inverter column for display
+    inverter_col = None
+    df_columns_lower_map = {str(c).strip().lower(): c for c in df.columns}
+    
+    for col in INVERTER_ID_COLS:
+        if col in df.columns:
+            inverter_col = col
+            break
+        elif col.strip().lower() in df_columns_lower_map:
+            inverter_col = df_columns_lower_map[col.strip().lower()]
+            break
+    
+    # Calculate metrics using cached function - Plot wise
+    plot_summary = calculate_plot_summary(df, inverter_col)
+    
+    # KPIs
+    st.markdown("### 📈 Key Performance Indicators")
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+    
+    total_inverters = df[inverter_col].nunique() if inverter_col and inverter_col in df.columns else 0
+    total_strings = int(df["Total Active Strings"].sum()) if "Total Active Strings" in df.columns else 0
+    working_strings = int(df["Working String Count"].sum()) if "Working String Count" in df.columns else 0
+    failed_strings = int(df["Failed String Count"].sum()) if "Failed String Count" in df.columns else 0
+    overall_availability = round((working_strings / total_strings) * 100, 2) if total_strings > 0 else 0.0
+    num_plots = plot_summary["Plot"].nunique() if not plot_summary.empty else 0
+    
+    kpi1.metric("🏗️ Total Plots", f"{num_plots:,}")
+    kpi2.metric("🔌 Total Inverters", f"{total_inverters:,}")
+    kpi3.metric("📊 Total Strings", f"{total_strings:,}")
+    kpi4.metric("✅ Working", f"{working_strings:,}")
+    kpi5.metric("❌ Failed", f"{failed_strings:,}")
+    kpi6.metric("📈 Availability", f"{overall_availability:.1f}%")
+    
+    st.markdown("---")
+    
+    # Display plot metrics cards
+    if not plot_summary.empty:
+        display_plot_metrics(plot_summary)
+        st.markdown("---")
+    
+    # Charts Section
+    st.subheader("📊 Plot-wise Visualization Dashboard")
+    st.caption("Understanding your PV plant performance at a glance")
+    
+    # Create charts with caching
+    charts = create_plot_charts(plot_summary)
+    
+    # Row 1: Stacked Bar Chart and Donut Chart
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.plotly_chart(charts["bar"], use_container_width=True, key="plot_bar")
+    
+    with col2:
+        st.plotly_chart(charts["donut"], use_container_width=True, key="overall_donut")
+    
+    # Row 2: Availability Chart and Treemap
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.plotly_chart(charts["availability"], use_container_width=True, key="avail_bar")
+    
+    with col2:
+        st.plotly_chart(charts["treemap"], use_container_width=True, key="plot_treemap")
+    
+    # Row 3: Scatter Plot
+    st.plotly_chart(charts["scatter"], use_container_width=True, key="plot_scatter")
+    
+    st.markdown("---")
+    
+    # Plot Summary Table with enhanced styling
+    st.subheader("📋 Detailed Plot Summary")
+    
+    if not plot_summary.empty:
+        # Prepare display dataframe
+        display_plot_df = plot_summary.copy()
+        
+        # Reorder columns for better readability
+        display_plot_df = display_plot_df[[
+            "Plot", "Total_Blocks", "Total_Inverters", 
+            "Total_Active_Strings", "Total_Working_Strings", "Total_Failed_Strings",
+            "Availability (%)", "Failure Percentage (%)", "Health Status"
+        ]]
+        
+        # Style the dataframe
+        def color_health_status(val):
+            if "Excellent" in str(val):
+                return 'background-color: #10b981; color: white; font-weight: bold; border-radius: 4px;'
+            elif "Good" in str(val):
+                return 'background-color: #34d399; color: white; font-weight: bold; border-radius: 4px;'
+            elif "Fair" in str(val):
+                return 'background-color: #fbbf24; color: black; font-weight: bold; border-radius: 4px;'
+            elif "Poor" in str(val):
+                return 'background-color: #ef4444; color: white; font-weight: bold; border-radius: 4px;'
+            return ''
+        
+        styled_plot_df = display_plot_df.style.map(color_health_status, subset=['Health Status'])
+        
+        # Format numeric columns with commas
+        styled_plot_df = styled_plot_df.format({
+            'Total_Active_Strings': '{:,.0f}',
+            'Total_Working_Strings': '{:,.0f}',
+            'Total_Failed_Strings': '{:,.0f}',
+            'Total_Inverters': '{:,.0f}',
+            'Total_Blocks': '{:,.0f}',
+            'Availability (%)': '{:.1f}%',
+            'Failure Percentage (%)': '{:.1f}%'
+        })
+        
+        # Add bar visualization for availability
+        def availability_bar(val):
+            if isinstance(val, (int, float)):
+                color = "#10b981" if val >= 90 else "#34d399" if val >= 70 else "#fbbf24" if val >= 50 else "#ef4444"
+                return f'background: linear-gradient(90deg, {color} {val}%, transparent {val}%); font-weight: bold; padding: 4px 8px; border-radius: 4px;'
+            return ''
+        
+        styled_plot_df = styled_plot_df.map(availability_bar, subset=['Availability (%)'])
+        
         st.dataframe(
-            styled_block_table,
+            styled_plot_df,
             use_container_width=True,
-            hide_index=True,
             column_config={
-                "Block": "Block Name",
-                "Total Strings": st.column_config.NumberColumn("Total Strings", format="%d"),
-                "Open Faults": st.column_config.NumberColumn("🔴 Open Faults", format="%d"),
-                "Closed/Restored": st.column_config.NumberColumn("🟢 Closed/Restored", format="%d"),
-                "Working Strings": st.column_config.NumberColumn("✅ Working Strings", format="%d"),
-                "Availability %": st.column_config.NumberColumn("📈 Availability %", format="%.2f%%")
+                "Plot": "📍 Plot",
+                "Total_Blocks": "🏗️ Blocks",
+                "Total_Inverters": "🔌 Inverters",
+                "Total_Active_Strings": "📊 Total Strings",
+                "Total_Working_Strings": "✅ Working",
+                "Total_Failed_Strings": "❌ Failed",
+                "Availability (%)": "📈 Availability",
+                "Failure Percentage (%)": "⚠️ Failure %",
+                "Health Status": "💚 Health"
             }
         )
-
-        st.caption(
-            f"Real-time unique strings in current filter: {len(unique_strings_df)} | "
-            f"Raw rows/fault history records: {len(df_filtered)}"
-        )
+        
+        # Export buttons
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            csv = plot_summary.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Plot Summary (CSV)",
+                data=csv,
+                file_name=f"plot_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            # Summary insights
+            best_plot = plot_summary.loc[plot_summary["Availability (%)"].idxmax()]
+            worst_plot = plot_summary.loc[plot_summary["Availability (%)"].idxmin()]
+            
+            st.info(f"""
+            **💡 Insights:**
+            - Best performing plot: **{best_plot['Plot']}** ({best_plot['Availability (%)']:.1f}% availability)
+            - Needs attention: **{worst_plot['Plot']}** ({worst_plot['Availability (%)']:.1f}% availability)
+            - Total working strings: **{working_strings:,}** out of **{total_strings:,}**
+            """)
     else:
-        st.info("No data available for the current filter.")
-
-    # 2. Fault Distribution by Block
-    st.subheader("📊 Fault Distribution by Block")
-    if not block_summary.empty:
-        chart_data = block_summary.set_index("Block")[["Open Faults", "Closed/Restored"]]
-        st.bar_chart(chart_data, color=["#ff6b6b", "#51cf66"])
-    else:
-        st.info("No fault distribution data available.")
-
-    def _highlight_status_with_color(val):
-        if val == "OPEN":
-            return "background-color:#fde2e2;color:#b3261e;font-weight:600;"
-        elif val == "CLOSED":
-            return "background-color:#dcf5e3;color:#1e7a3a;font-weight:600;"
-        return ""
-
-    def _highlight_row_color(row):
-        if row.get("Status") == "OPEN":
-            return ["background-color:#fde2e2"] * len(row)
-        elif row.get("Status") == "CLOSED":
-            return ["background-color:#dcf5e3"] * len(row)
-        return [""] * len(row)
-
-    # 3. Detailed Fault Details
-    st.subheader("📋 Detailed Fault Details")
-
-    display_cols = [
-        "Plot", "Block", "SACU", "Inverter ID", "String No",
-        "Failure Date & Time", "Restored Date & Time",
-        "Present Failure Hours", "Turn Around Time", "Remarks", "Status"
-    ]
-    display_cols = [c for c in display_cols if c in df_filtered.columns]
-
-    detail_df = df_filtered[display_cols].copy()
-
-    if "Present Failure Hours" in detail_df.columns:
-        detail_df = detail_df.sort_values(by="Present Failure Hours", ascending=False)
-
-    detail_df = format_hours_column(detail_df, "Present Failure Hours")
-    detail_df = format_hours_column(detail_df, "Turn Around Time")
-
-    styled_df = detail_df.style.apply(_highlight_row_color, axis=1)
-    if "Status" in detail_df.columns:
-        styled_df = styled_df.map(_highlight_status_with_color, subset=["Status"])
-
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-    # 4. Open Faults by Block
-    st.subheader("🔴 Open Faults by Block")
-    open_fault_counts = (
-        open_strings_df.groupby("Block")
-        .size()
-        .reset_index(name="Open Faults")
-    )
-
-    if not open_fault_counts.empty:
-        st.bar_chart(open_fault_counts.set_index("Block"), color="#1c6ea4")
-    else:
-        st.success("No active faults in current filter. ✅")
-# ══════════════════════════════════════════════════════════════════════════
-# TAB 2 — FAILURE / RECTIFIED ENTRY
-# ══════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.subheader("Failure / Rectified Entry")
-
-    action_mode = st.radio("Select Action", ["New Failure", "Rectified / Restoration"], horizontal=True)
-
-    # ── NEW FAILURE ─────────────────────────────────────────────────────
-    if action_mode == "New Failure":
-        hierarchy = select_hierarchy(df_master, key_prefix="nf")
-
-        if hierarchy:
-            plot_val, block_val, sacu_val, inverter_val, string_val, matched_row = hierarchy
-
-            existing_serial = ""
-            if not matched_row.empty and "Serial Number" in matched_row.columns:
-                sv = matched_row.iloc[0]["Serial Number"]
-                existing_serial = str(sv) if pd.notna(sv) else ""
-
-            if existing_serial.strip() == "":
-                serial_number = st.text_input("Serial Number (Optional)", key="new_serial")
-            else:
-                st.text_input("Serial Number", value=existing_serial, disabled=True)
-                serial_number = existing_serial
-
-            remarks_val = st.text_area("Failure Remarks", key="new_remarks")
-
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                failure_date = st.date_input("Failure Date", value=datetime.now().date(), key="failure_date")
-            with fc2:
-                failure_time = st.time_input(
-                    "Failure Time",
-                    value=datetime.now().time().replace(second=0, microsecond=0),
-                    key="failure_time"
-                )
-
-            if st.button("💾 Save Failure Entry", type="primary"):
-                failure_dt = datetime.combine(failure_date, failure_time)
-
-                if has_open_duplicate(df_master, plot_val, block_val, sacu_val, inverter_val, string_val):
-                    st.warning("An open fault already exists for this string.")
+        st.warning("No plot summary available.")
+# ==========================================
+# 9. MAIN APP (UPDATED)
+# ==========================================
+def main():
+    # Initialize default users
+    init_default_users()
+    
+    # Check authentication
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    
+    # Login UI
+    if not st.session_state.authenticated:
+        st.title("☀️ PV SCADA Analytics")
+        st.markdown("### Login to access the dashboard")
+        
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            
+            if st.button("Login", use_container_width=True):
+                user_data = authenticate_user(username, password)
+                if user_data:
+                    st.session_state.user = {
+                        "username": username,
+                        "role": user_data["role"],
+                        "assigned_plots": user_data.get("assigned_plots", [])
+                    }
+                    st.session_state.authenticated = True
+                    st.rerun()
                 else:
-                    new_row = build_new_failure_row(
-                        df_master, plot_val, block_val, sacu_val, inverter_val,
-                        string_val, serial_number, remarks_val, failure_dt
-                    )
-                    updated = pd.concat([df_master, pd.DataFrame([new_row])], ignore_index=True)
-                    finalize_and_persist(updated, "New failure entry added successfully.", dl_key="dl_new_failure")
-
-    # ── RECTIFIED / RESTORATION ─────────────────────────────────────────
-    else:
-        open_df = df_master[df_master["Status"] == "OPEN"].copy()
-
-        if open_df.empty:
-            st.success("No open faults available for rectification. ✅")
+                    st.error("Invalid username or password")
+        
+        st.markdown("---")
+        st.caption("Default users: admin/admin123, engineer1/eng123, engineer2/eng456")
+        return
+    
+    # Get current user
+    current_user = get_current_user()
+    if not current_user:
+        st.error("User not found")
+        return
+    
+    # Sidebar
+    st.sidebar.title("⚡ PV SCADA Control")
+    
+    # User info
+    role_badge = "👑 Admin" if current_user["role"] == "admin" else "🔧 Engineer"
+    st.sidebar.markdown(f"**User:** {current_user['username']} ({role_badge})")
+    
+    # Logout
+    if st.sidebar.button("🚪 Logout"):
+        st.session_state.authenticated = False
+        st.session_state.user = None
+        st.rerun()
+    
+    st.sidebar.markdown("---")
+    
+    # File upload section
+    st.sidebar.subheader("📁 File Management")
+    
+    # Check if file exists in backend
+    if "current_file" not in st.session_state:
+        latest_file = get_latest_excel_file()
+        if latest_file:
+            st.session_state.current_file = latest_file
+    
+    # Show current file info
+    if "current_file" in st.session_state:
+        metadata_file = EXCEL_FILES_DIR / "metadata.json"
+        if metadata_file.exists():
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            if st.session_state.current_file in metadata:
+                st.sidebar.info(f"📄 Current file: {metadata[st.session_state.current_file]['original_filename']}\n📅 {metadata[st.session_state.current_file]['timestamp']}")
+    
+    # File upload
+    uploaded_file = st.sidebar.file_uploader("Upload new SCADA Report (.xlsx)", type=["xlsx"])
+    if uploaded_file:
+        file_bytes = uploaded_file.getvalue()
+        stored_filename = save_excel_file(file_bytes, uploaded_file.name)
+        st.sidebar.success(f"✅ File uploaded: {uploaded_file.name}")
+        st.rerun()
+    
+    # Load data from backend
+    if "current_file" not in st.session_state:
+        st.info("No SCADA file available. Please upload one.")
+        return
+    
+    file_bytes = load_excel_from_backend(st.session_state.current_file)
+    if not file_bytes:
+        st.error("Could not load file from backend storage")
+        return
+    
+    # Process data
+    processed_dataframes = process_scada_excel_bytes(file_bytes)
+    
+    if not processed_dataframes:
+        st.error("No valid sheets or inverter columns were identified in the uploaded workbook.")
+        return
+    
+    # Apply user permissions
+    if current_user["role"] == "engineer":
+        allowed_plots = current_user.get("assigned_plots", [])
+        if allowed_plots:
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("🔒 Assigned Plots")
+            st.sidebar.write(", ".join(allowed_plots))
+    
+    # Sheet selection
+    sheet_selection = st.sidebar.selectbox("Select Sheet", list(processed_dataframes.keys()))
+    df_selected = processed_dataframes[sheet_selection].copy()
+    
+    # Apply plot filter based on user role
+    if current_user["role"] == "engineer":
+        allowed_plots = current_user.get("assigned_plots", [])
+        if allowed_plots:
+            df_selected = df_selected[df_selected["Plot"].isin(allowed_plots)]
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Filters")
+    
+    # Filters
+    plots = ["All"] + sorted([p for p in df_selected["Plot"].dropna().unique()])
+    selected_plot = st.sidebar.selectbox("Plot", plots)
+    
+    filtered_df = df_selected.copy()
+    if selected_plot != "All":
+        filtered_df = filtered_df[filtered_df["Plot"] == selected_plot]
+    
+    blocks = ["All"] + sorted([b for b in filtered_df["Block"].dropna().unique()])
+    selected_block = st.sidebar.selectbox("Block", blocks)
+    if selected_block != "All":
+        filtered_df = filtered_df[filtered_df["Block"] == selected_block]
+    
+    sacus = ["All"] + sorted([s for s in filtered_df["SACU"].dropna().unique()])
+    selected_sacu = st.sidebar.selectbox("SACU", sacus)
+    if selected_sacu != "All":
+        filtered_df = filtered_df[filtered_df["SACU"] == selected_sacu]
+    
+    # User management (Admin only)
+    if current_user["role"] == "admin":
+        user_management_ui()
+    
+    # Find inverter column for display
+    inverter_col = None
+    df_columns_lower_map = {str(c).strip().lower(): c for c in filtered_df.columns}
+    
+    for col in INVERTER_ID_COLS:
+        if col in filtered_df.columns:
+            inverter_col = col
+            break
+        elif col.strip().lower() in df_columns_lower_map:
+            inverter_col = df_columns_lower_map[col.strip().lower()]
+            break
+    
+    # Main content with tabs
+    tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🔌 PV String Details", "📋 Data Table"])
+    
+    with tab1:
+        if not filtered_df.empty:
+            main_dashboard_tab(filtered_df)
         else:
-            open_df["Fault Key"] = open_df.apply(
-                lambda r: f"{r['Plot']} | {r['Block']} | {r['SACU']} | {r['Inverter ID']} | {r['String No']} | {r['Failure Date & Time']}",
-                axis=1
-            )
-            # keep the original index alongside the label so we can update
-            # the exact row unambiguously, even if two faults share the
-            # same descriptive key.
-            key_to_index = dict(zip(open_df["Fault Key"], open_df.index))
-
-            selected_fault_key = st.selectbox("Select Open Fault", open_df["Fault Key"].tolist())
-            selected_idx = key_to_index[selected_fault_key]
-            selected_row = df_master.loc[selected_idx]
-
-            st.info(
-                f"Failure Time: {selected_row['Failure Date & Time']} | "
-                f"Current Age: {format_hours_to_hms(selected_row['Present Failure Hours'])}"
-            )
-
-            rc1, rc2 = st.columns(2)
-            with rc1:
-                restore_date = st.date_input("Rectified Date", value=datetime.now().date(), key="restore_date")
-            with rc2:
-                restore_time = st.time_input(
-                    "Rectified Time",
-                    value=datetime.now().time().replace(second=0, microsecond=0),
-                    key="restore_time"
-                )
-
-            rectified_remarks = st.text_area("Rectification Remarks", key="restore_remarks")
-
-            if st.button("💾 Save Rectified Entry", type="primary"):
-                restored_dt = datetime.combine(restore_date, restore_time)
-
-                if restored_dt <= selected_row["Failure Date & Time"]:
-                    st.error("Rectified Date & Time must be greater than Failure Date & Time.")
-                else:
-                    updated = df_master.copy()
-                    updated.loc[selected_idx, "Restored Date & Time"] = restored_dt
-
-                    old_remarks = str(updated.loc[selected_idx, "Remarks"] or "")
-                    separator = " | " if old_remarks.strip() else ""
-                    updated.loc[selected_idx, "Remarks"] = f"{old_remarks}{separator}Rectified: {rectified_remarks}"
-
-                    finalize_and_persist(updated, "Fault rectified successfully.", dl_key="dl_rectify")
-
-# ══════════════════════════════════════════════════════════════════════════
-# TAB 3 — LIVE FAULT EDITOR
-# ══════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.subheader("Operator Fault Logging & Verification")
-    st.caption("Edit cells directly, add new rows, or delete rows, then save.")
-
-    edit_columns = [
-        "Plot", "Block", "SACU", "Inverter ID", "String No", "Serial Number",
-        "Remarks", "Failure Date & Time", "Restored Date & Time",
-        "Turn Around Time", "Present Failure Hours", "Current Loss Hours", "Status"
-    ]
-    available_edit_columns = [col for col in edit_columns if col in df_filtered.columns]
-    readonly_cols = [
-        col for col in ["Turn Around Time", "Present Failure Hours", "Current Loss Hours", "Status"]
-        if col in available_edit_columns
-    ]
-
-    editor_source = df_filtered[available_edit_columns].copy()
-
-    edited_df = st.data_editor(
-        editor_source,
-        disabled=readonly_cols,
-        use_container_width=True,
-        num_rows="dynamic",
-        key="live_fault_editor"
-    )
-
-    if st.button("💾 Save Updates & Recalculate", type="primary"):
-        edited_df = edited_df.copy()
-        edited_df["Failure Date & Time"] = pd.to_datetime(edited_df["Failure Date & Time"], errors="coerce")
-        if "Restored Date & Time" in edited_df.columns:
-            edited_df["Restored Date & Time"] = pd.to_datetime(edited_df["Restored Date & Time"], errors="coerce")
-
-        updated = df_master.copy()
-
-        # Rows still present (matched by original row index) → overwrite in place.
-        existing_idx = edited_df.index.intersection(editor_source.index)
-        if len(existing_idx) > 0:
-            updated.loc[existing_idx, available_edit_columns] = edited_df.loc[existing_idx, available_edit_columns]
-
-        # Rows removed in the editor (present before, missing now) → drop.
-        removed_idx = editor_source.index.difference(edited_df.index)
-        if len(removed_idx) > 0:
-            updated = updated.drop(index=removed_idx)
-
-        # Brand-new rows added via the "+" control → append.
-        new_idx = edited_df.index.difference(editor_source.index)
-        if len(new_idx) > 0:
-            new_rows = edited_df.loc[new_idx].copy()
-            for col in df_master.columns:
-                if col not in new_rows.columns:
-                    new_rows[col] = None
-            updated = pd.concat([updated, new_rows[df_master.columns]], ignore_index=True)
-
-        finalize_and_persist(updated, "Master database updated successfully.", dl_key="dl_editor")
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# TAB 4 — SEARCH FAULTS
-# ══════════════════════════════════════════════════════════════════════════
-with tab4:
-    st.subheader("Search Faults")
-    st.caption("Find records by hierarchy, status, date range, remarks, serial number, or string number.")
-
-    search_df = df_filtered.copy()
-    selected_search_cols = []
-
-    with st.container(border=True):
-        st.markdown("**Filters**")
-        f1, f2, f3, f4 = st.columns(4)
-
-        status_options = ["All"] + get_options(search_df, "Status")
-        status_choice = f1.selectbox("Status", status_options, key="search_status")
-        if status_choice != "All":
-            search_df = search_df[search_df["Status"].astype(str) == str(status_choice)]
-
-        plot_options = ["All"] + get_options(search_df, "Plot")
-        plot_choice = f2.selectbox("Plot", plot_options, key="search_plot")
-        if plot_choice != "All":
-            search_df = search_df[search_df["Plot"].astype(str) == str(plot_choice)]
-
-        block_options = ["All"] + get_options(search_df, "Block")
-        block_choice = f3.selectbox("Block", block_options, key="search_block")
-        if block_choice != "All":
-            search_df = search_df[search_df["Block"].astype(str) == str(block_choice)]
-
-        sacu_options = ["All"] + get_options(search_df, "SACU")
-        sacu_choice = f4.selectbox("SACU", sacu_options, key="search_sacu")
-        if sacu_choice != "All":
-            search_df = search_df[search_df["SACU"].astype(str) == str(sacu_choice)]
-
-        f5, f6, f7, f8 = st.columns(4)
-
-        inverter_options = ["All"] + get_options(search_df, "Inverter ID")
-        inverter_choice = f5.selectbox("Inverter ID", inverter_options, key="search_inverter")
-        if inverter_choice != "All":
-            search_df = search_df[search_df["Inverter ID"].astype(str) == str(inverter_choice)]
-
-        string_query = f6.text_input("String No contains", key="search_string")
-        if string_query.strip():
-            search_df = search_df[
-                search_df["String No"].astype(str).str.contains(string_query.strip(), case=False, na=False)
-            ]
-
-        serial_query = f7.text_input("Serial Number contains", key="search_serial")
-        if serial_query.strip() and "Serial Number" in search_df.columns:
-            search_df = search_df[
-                search_df["Serial Number"].astype(str).str.contains(serial_query.strip(), case=False, na=False)
-            ]
-
-        remarks_query = f8.text_input("Remarks contains", key="search_remarks")
-        if remarks_query.strip() and "Remarks" in search_df.columns:
-            search_df = search_df[
-                search_df["Remarks"].astype(str).str.contains(remarks_query.strip(), case=False, na=False)
-            ]
-
-        keyword = st.text_input(
-            "Global search",
-            placeholder="Search plot, block, SACU, inverter, string, serial, remarks, status...",
-            key="search_keyword"
-        )
-        if keyword.strip():
-            searchable_cols = [
-                col for col in [
-                    "Plot", "Block", "SACU", "Inverter ID", "String No",
-                    "Serial Number", "Remarks", "Status"
-                ] if col in search_df.columns
-            ]
-            keyword_mask = pd.Series(False, index=search_df.index)
-            for col in searchable_cols:
-                keyword_mask = keyword_mask | search_df[col].astype(str).str.contains(
-                    keyword.strip(), case=False, na=False
-                )
-            search_df = search_df[keyword_mask]
-
-        with st.expander("Advanced filters and display"):
-            d1, d2 = st.columns(2)
-            use_failure_range = d1.checkbox("Filter by failure date", key="search_use_failure_date")
-            use_restored_range = d2.checkbox("Filter by restored date", key="search_use_restored_date")
-
-            if use_failure_range:
-                valid_failure = pd.to_datetime(search_df["Failure Date & Time"], errors="coerce").dropna()
-                default_start = valid_failure.min().date() if not valid_failure.empty else datetime.now().date()
-                default_end = valid_failure.max().date() if not valid_failure.empty else datetime.now().date()
-                failure_range = st.date_input(
-                    "Failure date range",
-                    value=(default_start, default_end),
-                    key="search_failure_range"
-                )
-                if len(failure_range) == 2:
-                    failure_start, failure_end = failure_range
-                    failure_dates = pd.to_datetime(search_df["Failure Date & Time"], errors="coerce").dt.date
-                    search_df = search_df[(failure_dates >= failure_start) & (failure_dates <= failure_end)]
-
-            if use_restored_range:
-                valid_restored = pd.to_datetime(search_df["Restored Date & Time"], errors="coerce").dropna()
-                default_start = valid_restored.min().date() if not valid_restored.empty else datetime.now().date()
-                default_end = valid_restored.max().date() if not valid_restored.empty else datetime.now().date()
-                restored_range = st.date_input(
-                    "Restored date range",
-                    value=(default_start, default_end),
-                    key="search_restored_range"
-                )
-                if len(restored_range) == 2:
-                    restored_start, restored_end = restored_range
-                    restored_dates = pd.to_datetime(search_df["Restored Date & Time"], errors="coerce").dt.date
-                    search_df = search_df[(restored_dates >= restored_start) & (restored_dates <= restored_end)]
-
-            h1, h2 = st.columns(2)
-            min_loss = h1.number_input("Minimum current loss hours", min_value=0.0, value=0.0, step=1.0)
-            max_loss_enabled = h2.checkbox("Set maximum current loss hours", key="search_max_loss_enabled")
-            if min_loss > 0 and "Current Loss Hours" in search_df.columns:
-                loss_hours = pd.to_numeric(search_df["Current Loss Hours"], errors="coerce").fillna(0)
-                search_df = search_df[loss_hours >= min_loss]
-            if max_loss_enabled and "Current Loss Hours" in search_df.columns:
-                max_loss = h2.number_input(
-                    "Maximum current loss hours",
-                    min_value=0.0,
-                    value=float(max(min_loss, 1.0)),
-                    step=1.0
-                )
-                loss_hours = pd.to_numeric(search_df["Current Loss Hours"], errors="coerce").fillna(0)
-                search_df = search_df[loss_hours <= max_loss]
-
-            default_search_cols = [
-                "Plot", "Block", "SACU", "Inverter ID", "String No", "Serial Number",
-                "Failure Date & Time", "Restored Date & Time", "Current Loss Hours",
-                "Present Failure Hours", "Turn Around Time", "Remarks", "Status"
-            ]
-            available_search_cols = [col for col in default_search_cols if col in search_df.columns]
-            selected_search_cols = st.multiselect(
-                "Columns to show",
-                options=[col for col in df_master.columns if col in search_df.columns],
-                default=available_search_cols,
-                key="search_columns"
-            )
-
-    search_cols = selected_search_cols or [
-        col for col in [
-            "Plot", "Block", "SACU", "Inverter ID", "String No", "Serial Number",
-            "Failure Date & Time", "Restored Date & Time", "Current Loss Hours",
-            "Present Failure Hours", "Turn Around Time", "Remarks", "Status"
-        ] if col in search_df.columns
-    ]
-
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Search Results", len(search_df))
-    r2.metric("Open Results", int((search_df["Status"] == "OPEN").sum()) if "Status" in search_df.columns else 0)
-    r3.metric("Closed Results", int((search_df["Status"] == "CLOSED").sum()) if "Status" in search_df.columns else 0)
-
-    result_df = search_df[search_cols].copy() if search_cols else search_df.copy()
-    for hours_col in ["Current Loss Hours", "Present Failure Hours", "Turn Around Time"]:
-        result_df = format_hours_column(result_df, hours_col)
-
-    st.dataframe(result_df, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "Download Search Results",
-        data=get_download_excel_bytes(search_df),
-        file_name="String_Fault_Search_Results.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_search_results",
-        disabled=search_df.empty
-    )
-
-# TAB 5 — BULK FAILURE / RESTORE
-# Select down to an Inverter, then act on many strings under it in one go
-# instead of repeating the single-string flow string-by-string.
-# ══════════════════════════════════════════════════════════════════════════
-with tab5:
-    st.subheader("Bulk Failure / Restore")
-    st.caption("Pick a Plot → Block → SACU → Inverter, then mark several strings failed or restored in a single action.")
-
-    bulk_mode = st.radio("Bulk Action", ["Bulk Mark as Failed", "Bulk Restore"], horizontal=True, key="bulk_mode")
-
-    with st.container(border=True):
-        st.markdown("**1. Locate the inverter**")
-        hierarchy = select_hierarchy(df_master, key_prefix="bulk", layout="grid", include_string=False)
-
-        if hierarchy:
-            plot_val, block_val, sacu_val, inverter_val, df_inverter = hierarchy
-
-            scope_mask = (
-                (df_master["Plot"].astype(str) == str(plot_val)) &
-                (df_master["Block"].astype(str) == str(block_val)) &
-                (df_master["SACU"].astype(str) == str(sacu_val)) &
-                (df_master["Inverter ID"].astype(str) == str(inverter_val))
-            )
-
-            # ── BULK MARK AS FAILED ─────────────────────────────────────
-            if bulk_mode == "Bulk Mark as Failed":
-                open_strings_here = set(
-                    df_master[scope_mask & (df_master["Status"] == "OPEN")]["String No"].astype(str)
-                )
-                all_strings_here = get_options(df_inverter, "String No")
-                available_strings = [s for s in all_strings_here if s not in open_strings_here]
-
-                if not available_strings:
-                    st.info("Every string under this inverter already has an open fault.")
-                else:
-                    st.markdown("**2. Select strings to mark as failed**")
-                    if open_strings_here:
-                        st.caption(f"Excluded (already open): {', '.join(sorted(open_strings_here))}")
-
-                    select_all = st.checkbox("Select all available strings", key="bulk_fail_all")
-                    default_selection = available_strings if select_all else []
-                    selected_strings = st.multiselect(
-                        "Strings", available_strings, default=default_selection, key="bulk_fail_strings"
+            st.warning("No data available with current filters and permissions")
+    
+    with tab2:
+        if not filtered_df.empty:
+            create_pv_string_tab(filtered_df)
+        else:
+            st.warning("No data available for PV string analysis")
+    
+    with tab3:
+        st.subheader("Inverter Data Table")
+        if not filtered_df.empty:
+            # Rename inverter column for display
+            display_df = filtered_df.copy()
+            if inverter_col and inverter_col != "Inverter ID":
+                display_df = display_df.rename(columns={inverter_col: "Inverter ID"})
+            
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                column_config={
+                    "Availability (%)": st.column_config.ProgressColumn(
+                        "Availability (%)",
+                        min_value=0,
+                        max_value=100,
+                        format="%.2f%%"
+                    ),
+                    "Failure Percentage (%)": st.column_config.NumberColumn(
+                        "Failure Percentage (%)",
+                        format="%.2f%%"
                     )
+                }
+            )
+            
+            # Download button
+            download_bytes = create_excel_download({sheet_selection: filtered_df})
+            st.download_button(
+                label="📥 Download Filtered Excel",
+                data=download_bytes,
+                file_name=f"processed_{sheet_selection}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No data available")
 
-                    st.markdown("**3. Failure date & time (applied to all selected)**")
-                    # Updated to use date_input and time_input instead of dropdown
-                    fail_col1, fail_col2 = st.columns(2)
-                    with fail_col1:
-                        failure_date = st.date_input("Failure Date", value=datetime.now().date(), key="bulk_fail_date")
-                    with fail_col2:
-                        failure_time = st.time_input(
-                            "Failure Time",
-                            value=datetime.now().time().replace(second=0, microsecond=0),
-                            key="bulk_fail_time"
-                        )
-                    failure_dt = datetime.combine(failure_date, failure_time)
-
-                    st.markdown("**4. Failure reason (applied to all selected)**")
-                    remark_choice = st.selectbox("Failure Remarks", FAULT_REMARK_OPTIONS, key="bulk_fail_remark")
-                    if remark_choice.startswith("Other"):
-                        other_note = st.text_input("Brief note for 'Other'", key="bulk_fail_remark_other")
-                        remarks_val = other_note if other_note.strip() else "Other"
-                    else:
-                        remarks_val = remark_choice
-
-                    st.write("")
-                    if st.button(
-                        f"💾 Log {len(selected_strings)} Failure(s)",
-                        type="primary", key="bulk_fail_save", disabled=not selected_strings
-                    ):
-                        new_rows = []
-                        for s in selected_strings:
-                            matched = df_inverter[df_inverter["String No"].astype(str) == str(s)].head(1)
-                            serial = ""
-                            if not matched.empty and "Serial Number" in matched.columns:
-                                sv = matched.iloc[0]["Serial Number"]
-                                serial = str(sv) if pd.notna(sv) else ""
-                            new_rows.append(build_new_failure_row(
-                                df_master, plot_val, block_val, sacu_val, inverter_val,
-                                s, serial, remarks_val, failure_dt
-                            ))
-                        updated = pd.concat([df_master, pd.DataFrame(new_rows)], ignore_index=True)
-                        finalize_and_persist(
-                            updated, f"{len(new_rows)} failure entr{'y' if len(new_rows)==1 else 'ies'} logged successfully.",
-                            dl_key="dl_bulk_fail"
-                        )
-
-            # ── BULK RESTORE ────────────────────────────────────────────
-            else:
-                open_df_here = df_master[scope_mask & (df_master["Status"] == "OPEN")].copy()
-
-                if open_df_here.empty:
-                    st.success("No open faults under this inverter. ✅")
-                else:
-                    open_df_here["Fault Key"] = open_df_here.apply(
-                        lambda r: f"{r['String No']}  (open since {r['Failure Date & Time']:%Y-%m-%d %H:%M})",
-                        axis=1
-                    )
-                    key_to_index = dict(zip(open_df_here["Fault Key"], open_df_here.index))
-                    all_keys = open_df_here["Fault Key"].tolist()
-
-                    st.markdown("**2. Select strings to restore**")
-                    select_all = st.checkbox("Select all open strings", key="bulk_restore_all")
-                    default_selection = all_keys if select_all else []
-                    selected_keys = st.multiselect(
-                        "Open Strings", all_keys, default=default_selection, key="bulk_restore_strings"
-                    )
-
-                    st.markdown("**3. Restored date & time (applied to all selected)**")
-                    # Updated to use date_input and time_input instead of dropdown
-                    restore_col1, restore_col2 = st.columns(2)
-                    with restore_col1:
-                        restored_date = st.date_input("Restored Date", value=datetime.now().date(), key="bulk_restore_date")
-                    with restore_col2:
-                        restored_time = st.time_input(
-                            "Restored Time",
-                            value=datetime.now().time().replace(second=0, microsecond=0),
-                            key="bulk_restore_time"
-                        )
-                    restored_dt = datetime.combine(restored_date, restored_time)
-
-                    st.markdown("**4. Rectification remarks (applied to all selected)**")
-                    remark_choice = st.selectbox("Rectification Remarks", RESTORE_REMARK_OPTIONS, key="bulk_restore_remark")
-                    if remark_choice.startswith("Other"):
-                        other_note = st.text_input("Brief note for 'Other'", key="bulk_restore_remark_other")
-                        rectified_remarks = other_note if other_note.strip() else "Other"
-                    else:
-                        rectified_remarks = remark_choice
-
-                    st.write("")
-                    if st.button(
-                        f"💾 Restore {len(selected_keys)} String(s)",
-                        type="primary", key="bulk_restore_save", disabled=not selected_keys
-                    ):
-                        invalid_keys = [
-                            k for k in selected_keys
-                            if restored_dt <= df_master.loc[key_to_index[k], "Failure Date & Time"]
-                        ]
-                        if invalid_keys:
-                            st.error(
-                                "Restored date/time must be after the failure time for: " +
-                                ", ".join(invalid_keys)
-                            )
-                        else:
-                            updated = df_master.copy()
-                            for k in selected_keys:
-                                idx = key_to_index[k]
-                                updated.loc[idx, "Restored Date & Time"] = restored_dt
-                                old_remarks = str(updated.loc[idx, "Remarks"] or "")
-                                separator = " | " if old_remarks.strip() else ""
-                                updated.loc[idx, "Remarks"] = f"{old_remarks}{separator}Rectified: {rectified_remarks}"
-
-                            finalize_and_persist(
-                                updated,
-                                f"{len(selected_keys)} fault{'s' if len(selected_keys)!=1 else ''} restored successfully.",
-                                dl_key="dl_bulk_restore"
-                            )
+if __name__ == "__main__":
+    main()
