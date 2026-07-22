@@ -1713,7 +1713,7 @@ def main():
         return
     
     # Sidebar
-    st.sidebar.title("⚡ PV SCADA Control")
+    st.sidebar.title("⚡ PV String Control")
     
     # User info
     role_badge = "👑 Admin" if current_user["role"] == "admin" else "🔧 Engineer/ 💼Manager"
