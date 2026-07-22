@@ -1743,12 +1743,10 @@ def main():
             with open(metadata_file, 'r') as f:
                 metadata = json.load(f)
             if st.session_state.current_file in metadata:
-                st.sidebar.info(f"📄 Current file: {metadata[st.session_state.current_file]['original_filename']}\n📅 {metadata[st.session_state.current_file]['timestamp']}")
+                st.sidebar.info(f"📄 Current file: {metadata[st.session_state.current_file]['originalfilename']}\n📅 {metadata[st.session_state.current_file]['timestamp']}")
     
     # File upload
-    uploaded_file = None
-    if current_user["role"] == "admin":
-        uploaded_file = st.sidebar.file_uploader("Upload new SCADA Report (.xlsx)", type=["xlsx"])
+    uploaded_file = st.sidebar.file_uploader("Upload new SCADA Report (.xlsx)", type=["xlsx"])
     if uploaded_file:
         file_bytes = uploaded_file.getvalue()
         stored_filename = save_excel_file(file_bytes, uploaded_file.name)
