@@ -1505,7 +1505,7 @@ def display_plot_metrics(plot_summary):
 
 def main_dashboard_tab(df):
     """Main dashboard tab with Plot-wise visualizations"""
-    st.title("☀️ PV String Performance Dashboard")
+    st.title("☀️ Solar PV String Performance Dashboard")
     
     # Find the actual inverter column for display
     inverter_col = None
@@ -1681,7 +1681,7 @@ def main():
     
     # Login UI
     if not st.session_state.authenticated:
-        st.title("☀️ PV String Analytics")
+        st.title("☀️ Solar PV String Analytics")
         st.markdown("### Login to access the dashboard")
         
         col1, col2, col3 = st.columns([1, 1, 1])
@@ -1713,7 +1713,7 @@ def main():
         return
     
     # Sidebar
-    st.sidebar.title("⚡ PV String Control")
+    st.sidebar.title("⚡ PV String Template")
     
     # User info
     role_badge = "👑 Admin" if current_user["role"] == "admin" else "🔧 Engineer/ 💼Manager"
