@@ -1716,7 +1716,7 @@ def main():
     st.sidebar.title("⚡ PV SCADA Control")
     
     # User info
-    role_badge = "👑 Admin" if current_user["role"] == "admin" else "🔧 Engineer"
+    role_badge = "👑 Admin" if current_user["role"] == "admin" else "🔧 Engineer/ 💼Manager"
     st.sidebar.markdown(f"**User:** {current_user['username']} ({role_badge})")
     
     # Logout
