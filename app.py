@@ -15,7 +15,7 @@ import plotly.io as pio
 # 1. PAGE CONFIGURATION & STYLING
 # ==========================================
 st.set_page_config(
-    page_title="PV SCADA Analytics",
+    page_title="PV String Analytics",
     page_icon="☀️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -134,33 +134,33 @@ def save_users(users):
     with open(USERS_FILE, 'w') as f:
         json.dump(users, f, indent=2)
 
-def init_default_users():
-    """Initialize default users if no users exist"""
-    users = load_users()
-    if not users:
-        default_users = {
-            "admin": {
-                "password": hashlib.sha256("admin123".encode()).hexdigest(),
-                "role": "admin",
-                "assigned_plots": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"],
-                "created_at": datetime.now().isoformat()
-            },
-            "engineer1": {
-                "password": hashlib.sha256("eng123".encode()).hexdigest(),
-                "role": "engineer",
-                "assigned_plots": ["P1", "P2", "P3"],
-                "created_at": datetime.now().isoformat()
-            },
-            "engineer2": {
-                "password": hashlib.sha256("eng456".encode()).hexdigest(),
-                "role": "engineer",
-                "assigned_plots": ["P4", "P5", "P6"],
-                "created_at": datetime.now().isoformat()
-            }
-        }
-        save_users(default_users)
-        return default_users
-    return users
+# def init_default_users():
+#     """Initialize default users if no users exist"""
+#     users = load_users()x
+#     if not users:
+#         default_users = {
+#             "admin": {
+#                 "password": hashlib.sha256("admin123".encode()).hexdigest(),
+#                 "role": "admin",
+#                 "assigned_plots": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"],
+#                 "created_at": datetime.now().isoformat()
+#             },
+#             "engineer1": {
+#                 "password": hashlib.sha256("eng123".encode()).hexdigest(),
+#                 "role": "engineer",
+#                 "assigned_plots": ["P1", "P2", "P3"],
+#                 "created_at": datetime.now().isoformat()
+#             },
+#             "engineer2": {
+#                 "password": hashlib.sha256("eng456".encode()).hexdigest(),
+#                 "role": "engineer",
+#                 "assigned_plots": ["P4", "P5", "P6"],
+#                 "created_at": datetime.now().isoformat()
+#             }
+#         }
+#         save_users(default_users)
+#         return default_users
+#     return users
 
 def authenticate_user(username, password):
     """Authenticate user with password"""
@@ -180,36 +180,69 @@ def get_current_user():
 # ==========================================
 # 4. EXCEL FILE MANAGEMENT (Backend Storage)
 # ==========================================
+# def save_excel_file(file_bytes, filename):
+#     """Save uploaded Excel file to backend storage"""
+#     # Generate unique filename with timestamp
+#     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     file_hash = hashlib.md5(file_bytes).hexdigest()[:8]
+#     stored_filename = f"{timestamp}_{file_hash}_{filename}"
+#     file_path = EXCEL_FILES_DIR / stored_filename
+    
+#     # Save file
+#     with open(file_path, 'wb') as f:
+#         f.write(file_bytes)
+    
+#     # Store metadata
+#     metadata_file = EXCEL_FILES_DIR / "metadata.json"
+#     metadata = {}
+#     if metadata_file.exists():
+#         with open(metadata_file, 'r') as f:
+#             metadata = json.load(f)
+    
+#     metadata[stored_filename] = {
+#         "original_filename": filename,
+#         "timestamp": timestamp,
+#         "file_hash": file_hash,
+#         "file_size": len(file_bytes)
+#     }
+    
+#     with open(metadata_file, 'w') as f:
+#         json.dump(metadata, f, indent=2)
+    
+#     # Update session state
+#     st.session_state.current_file = stored_filename
+#     return stored_filename
 def save_excel_file(file_bytes, filename):
-    """Save uploaded Excel file to backend storage"""
-    # Generate unique filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_hash = hashlib.md5(file_bytes).hexdigest()[:8]
-    stored_filename = f"{timestamp}_{file_hash}_{filename}"
-    file_path = EXCEL_FILES_DIR / stored_filename
-    
-    # Save file
-    with open(file_path, 'wb') as f:
-        f.write(file_bytes)
-    
-    # Store metadata
     metadata_file = EXCEL_FILES_DIR / "metadata.json"
+    file_hash = hashlib.md5(file_bytes).hexdigest()
+    ext = Path(filename).suffix or ".xlsx"
+    stored_filename = f"{file_hash}{ext}"
+    filepath = EXCEL_FILES_DIR / stored_filename
+
     metadata = {}
     if metadata_file.exists():
-        with open(metadata_file, 'r') as f:
+        with open(metadata_file, "r") as f:
             metadata = json.load(f)
-    
+
+    for existing_name, info in metadata.items():
+        if info.get("filehash") == file_hash:
+            st.session_state.current_file = existing_name
+            return existing_name
+
+    if not filepath.exists():
+        with open(filepath, "wb") as f:
+            f.write(file_bytes)
+
     metadata[stored_filename] = {
-        "original_filename": filename,
-        "timestamp": timestamp,
-        "file_hash": file_hash,
-        "file_size": len(file_bytes)
+        "originalfilename": filename,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "filehash": file_hash,
+        "filesize": len(file_bytes)
     }
-    
-    with open(metadata_file, 'w') as f:
+
+    with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=2)
-    
-    # Update session state
+
     st.session_state.current_file = stored_filename
     return stored_filename
 
@@ -1472,7 +1505,7 @@ def display_plot_metrics(plot_summary):
 
 def main_dashboard_tab(df):
     """Main dashboard tab with Plot-wise visualizations"""
-    st.title("☀️ Solar PV String Availability Dashboard")
+    st.title("☀️ PV String Performance Dashboard")
     
     # Find the actual inverter column for display
     inverter_col = None
@@ -1490,7 +1523,7 @@ def main_dashboard_tab(df):
     plot_summary = calculate_plot_summary(df, inverter_col)
     
     # KPIs
-    st.markdown("### 📈 Key Performance Indicators")
+    st.markdown("### 0 Key Performance Indicators")
     kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
     
     total_inverters = df[inverter_col].nunique() if inverter_col and inverter_col in df.columns else 0
@@ -1515,7 +1548,7 @@ def main_dashboard_tab(df):
         st.markdown("---")
     
     # Charts Section
-    st.subheader("📊 Plot-wise Visualization Dashboard")
+    st.subheader("Plot-wise Visualization Dashboard")
     st.caption("Understanding your PV plant performance at a glance")
     
     # Create charts with caching
@@ -1545,7 +1578,7 @@ def main_dashboard_tab(df):
     st.markdown("---")
     
     # Plot Summary Table with enhanced styling
-    st.subheader("📋 Detailed Plot Summary")
+    st.subheader("Detailed Plot Summary")
     
     if not plot_summary.empty:
         # Prepare display dataframe
@@ -1631,6 +1664,7 @@ def main_dashboard_tab(df):
             - Best performing plot: **{best_plot['Plot']}** ({best_plot['Availability (%)']:.1f}% availability)
             - Needs attention: **{worst_plot['Plot']}** ({worst_plot['Availability (%)']:.1f}% availability)
             - Total working strings: **{working_strings:,}** out of **{total_strings:,}**
+            
             """)
     else:
         st.warning("No plot summary available.")
@@ -1639,7 +1673,7 @@ def main_dashboard_tab(df):
 # ==========================================
 def main():
     # Initialize default users
-    init_default_users()
+    # init_default_users()
     
     # Check authentication
     if "authenticated" not in st.session_state:
@@ -1647,7 +1681,7 @@ def main():
     
     # Login UI
     if not st.session_state.authenticated:
-        st.title("☀️ PV SCADA Analytics")
+        st.title("☀️ PV String Analytics")
         st.markdown("### Login to access the dashboard")
         
         col1, col2, col3 = st.columns([1, 1, 1])
@@ -1661,7 +1695,7 @@ def main():
                     st.session_state.user = {
                         "username": username,
                         "role": user_data["role"],
-                        "assigned_plots": user_data.get("assigned_plots", [])
+                        "aPssigned_plots": user_data.get("assigned_plots", [])
                     }
                     st.session_state.authenticated = True
                     st.rerun()
