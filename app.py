@@ -1712,7 +1712,9 @@ def main():
                 st.sidebar.info(f"📄 Current file: {metadata[st.session_state.current_file]['original_filename']}\n📅 {metadata[st.session_state.current_file]['timestamp']}")
     
     # File upload
-    uploaded_file = st.sidebar.file_uploader("Upload new SCADA Report (.xlsx)", type=["xlsx"])
+    uploaded_file = None
+    if current_user["role"] == "admin":
+        uploaded_file = st.sidebar.file_uploader("Upload new SCADA Report (.xlsx)", type=["xlsx"])
     if uploaded_file:
         file_bytes = uploaded_file.getvalue()
         stored_filename = save_excel_file(file_bytes, uploaded_file.name)
