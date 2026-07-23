@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 import streamlit as st
 import plotly.io as pio
+import restore  # Import the restore module
+
 # ==========================================
 # 1. PAGE CONFIGURATION & STYLING
 # ==========================================
@@ -35,11 +37,6 @@ st.markdown("""
         font-weight: 700;
         color: #38bdf8;
     }
-    /* Heat map header colors */
-    .string-header-high { background-color: #10b981; color: white; }
-    .string-header-medium { background-color: #f59e0b; color: white; }
-    .string-header-low { background-color: #ef4444; color: white; }
-    .string-header-verylow { background-color: #7f1d1d; color: white; }
     .stDataFrame thead th {
         background-color: #1e293b;
         color: white;
@@ -134,33 +131,33 @@ def save_users(users):
     with open(USERS_FILE, 'w') as f:
         json.dump(users, f, indent=2)
 
-# def init_default_users():
-#     """Initialize default users if no users exist"""
-#     users = load_users()x
-#     if not users:
-#         default_users = {
-#             "admin": {
-#                 "password": hashlib.sha256("admin123".encode()).hexdigest(),
-#                 "role": "admin",
-#                 "assigned_plots": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"],
-#                 "created_at": datetime.now().isoformat()
-#             },
-#             "engineer1": {
-#                 "password": hashlib.sha256("eng123".encode()).hexdigest(),
-#                 "role": "engineer",
-#                 "assigned_plots": ["P1", "P2", "P3"],
-#                 "created_at": datetime.now().isoformat()
-#             },
-#             "engineer2": {
-#                 "password": hashlib.sha256("eng456".encode()).hexdigest(),
-#                 "role": "engineer",
-#                 "assigned_plots": ["P4", "P5", "P6"],
-#                 "created_at": datetime.now().isoformat()
-#             }
-#         }
-#         save_users(default_users)
-#         return default_users
-#     return users
+def init_default_users():
+    """Initialize default users if no users exist"""
+    users = load_users()
+    if not users:
+        default_users = {
+            "admin": {
+                "password": hashlib.sha256("admin123".encode()).hexdigest(),
+                "role": "admin",
+                "assigned_plots": ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"],
+                "created_at": datetime.now().isoformat()
+            },
+            "engineer1": {
+                "password": hashlib.sha256("eng123".encode()).hexdigest(),
+                "role": "engineer",
+                "assigned_plots": ["P1", "P2", "P3"],
+                "created_at": datetime.now().isoformat()
+            },
+            "engineer2": {
+                "password": hashlib.sha256("eng456".encode()).hexdigest(),
+                "role": "engineer",
+                "assigned_plots": ["P4", "P5", "P6"],
+                "created_at": datetime.now().isoformat()
+            }
+        }
+        save_users(default_users)
+        return default_users
+    return users
 
 def authenticate_user(username, password):
     """Authenticate user with password"""
@@ -177,42 +174,21 @@ def get_current_user():
         return st.session_state.user
     return None
 
+def is_admin():
+    """Check if current user is admin"""
+    user = get_current_user()
+    return user and user.get("role") == "admin"
+
+def is_engineer():
+    """Check if current user is engineer"""
+    user = get_current_user()
+    return user and user.get("role") == "engineer"
+
 # ==========================================
 # 4. EXCEL FILE MANAGEMENT (Backend Storage)
 # ==========================================
-# def save_excel_file(file_bytes, filename):
-#     """Save uploaded Excel file to backend storage"""
-#     # Generate unique filename with timestamp
-#     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-#     file_hash = hashlib.md5(file_bytes).hexdigest()[:8]
-#     stored_filename = f"{timestamp}_{file_hash}_{filename}"
-#     file_path = EXCEL_FILES_DIR / stored_filename
-    
-#     # Save file
-#     with open(file_path, 'wb') as f:
-#         f.write(file_bytes)
-    
-#     # Store metadata
-#     metadata_file = EXCEL_FILES_DIR / "metadata.json"
-#     metadata = {}
-#     if metadata_file.exists():
-#         with open(metadata_file, 'r') as f:
-#             metadata = json.load(f)
-    
-#     metadata[stored_filename] = {
-#         "original_filename": filename,
-#         "timestamp": timestamp,
-#         "file_hash": file_hash,
-#         "file_size": len(file_bytes)
-#     }
-    
-#     with open(metadata_file, 'w') as f:
-#         json.dump(metadata, f, indent=2)
-    
-#     # Update session state
-#     st.session_state.current_file = stored_filename
-#     return stored_filename
 def save_excel_file(file_bytes, filename):
+    """Save uploaded Excel file to backend storage"""
     metadata_file = EXCEL_FILES_DIR / "metadata.json"
     file_hash = hashlib.md5(file_bytes).hexdigest()
     ext = Path(filename).suffix or ".xlsx"
@@ -446,7 +422,6 @@ def get_pv_string_columns(df):
         if col_str.startswith("PV-I"):
             pv_current_cols.append(col)
         elif col_str.startswith("PV") and col_str != "PV" and not col_str.startswith("PV-I"):
-            # Try to parse as PV voltage
             try:
                 num = int(col_str[2:])
                 if 1 <= num <= 28:
@@ -459,30 +434,30 @@ def get_pv_string_columns(df):
 def get_string_health_color(value):
     """Get color for string health based on current value"""
     if pd.isna(value):
-        return "#64748b"  # Gray
+        return "#64748b"
     if value > 5.0:
-        return "#10b981"  # Green - Excellent
+        return "#10b981"
     elif value > 3.0:
-        return "#34d399"  # Light Green - Good
+        return "#34d399"
     elif value > 1.5:
-        return "#fbbf24"  # Yellow - Fair
+        return "#fbbf24"
     elif value > 0.5:
-        return "#f59e0b"  # Orange - Poor
+        return "#f59e0b"
     else:
-        return "#ef4444"  # Red - Critical
+        return "#ef4444"
 
 def get_column_header_color(value):
     """Get color for column header based on working percentage"""
     if pd.isna(value):
         return "#64748b"
     if value >= 80:
-        return "#10b981"  # Green
+        return "#10b981"
     elif value >= 60:
-        return "#f59e0b"  # Yellow
+        return "#f59e0b"
     elif value >= 40:
-        return "#f97316"  # Orange
+        return "#f97316"
     else:
-        return "#ef4444"  # Red
+        return "#ef4444"
 
 # ==========================================
 # 6. PARSER
@@ -539,6 +514,14 @@ def process_scada_excel_bytes(file_bytes):
         df = df[final_columns]
 
         processed_dfs[sheet_name] = df
+
+    if processed_dfs:
+        first_sheet = next(iter(processed_dfs))
+        history_df = processed_dfs[first_sheet].copy()
+        restore.update_string_history(
+            history_df,
+            datetime.now().strftime("%Y-%m-%d")
+        )
 
     return processed_dfs
 
@@ -631,10 +614,6 @@ def user_management_ui():
 
 # ==========================================
 # 8. UI - Main Tabs
-# ==========================================
-
-# ==========================================
-# 8. UI - Main Tabs (UPDATED)
 # ==========================================
 def create_pv_string_tab(df):
     """Create the inverter-wise PV string details tab"""
@@ -1104,97 +1083,10 @@ def create_pv_string_tab(df):
     else:
         st.info("No PV string data available for the selected filters")
 
-# def main_dashboard_tab(df):
-#     """Main dashboard tab"""
-#     st.title("Solar PV String Availability Dashboard")
-#     st.caption(f"Inverters: {len(df)}")
-    
-#     # Find the actual inverter column for display
-#     inverter_col = None
-#     df_columns_lower_map = {str(c).strip().lower(): c for c in df.columns}
-    
-#     for col in INVERTER_ID_COLS:
-#         if col in df.columns:
-#             inverter_col = col
-#             break
-#         elif col.strip().lower() in df_columns_lower_map:
-#             inverter_col = df_columns_lower_map[col.strip().lower()]
-#             break
-    
-#     # KPIs
-#     kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
-    
-#     total_inverters = df[inverter_col].nunique() if inverter_col and inverter_col in df.columns else 0
-#     total_strings = int(df["Total Active Strings"].sum()) if "Total Active Strings" in df.columns else 0
-#     working_strings = int(df["Working String Count"].sum()) if "Working String Count" in df.columns else 0
-#     failed_strings = int(df["Failed String Count"].sum()) if "Failed String Count" in df.columns else 0
-#     overall_availability = round((working_strings / total_strings) * 100, 2) if total_strings > 0 else 0.0
-    
-#     kpi1.metric("Total Inverters", f"{total_inverters:,}")
-#     kpi2.metric("Total Active Strings", f"{total_strings:,}")
-#     kpi3.metric("Working Strings", f"{working_strings:,}")
-#     kpi4.metric("Failed Strings", f"{failed_strings:,}")
-#     kpi5.metric("Availability", f"{overall_availability:.2f}%")
-    
-#     st.markdown("---")
-    
-#     col1, col2 = st.columns(2)
-    
-#     with col1:
-#         st.subheader("Block-wise Strings")
-#         if not df.empty:
-#             block_summary = df.groupby("Block", as_index=False).agg(
-#                 Total_Active_Strings=("Total Active Strings", "sum"),
-#                 Working_String_Count=("Working String Count", "sum"),
-#                 Failed_String_Count=("Failed String Count", "sum")
-#             )
-#             fig_bar = px.bar(
-#                 block_summary,
-#                 x="Block",
-#                 y=["Working_String_Count", "Failed_String_Count"],
-#                 barmode="stack",
-#                 color_discrete_map={
-#                     "Working_String_Count": "#10b981",
-#                     "Failed_String_Count": "#ef4444"
-#                 }
-#             )
-#             fig_bar.update_layout(height=400)
-#             st.plotly_chart(fig_bar, use_container_width=True)
-#         else:
-#             st.warning("No records available for the selected filters.")
-    
-#     with col2:
-#         st.subheader("String Health")
-#         fig_pie = go.Figure(data=[go.Pie(
-#             labels=["Working Strings", "Failed Strings"],
-#             values=[working_strings, failed_strings],
-#             hole=0.55,
-#             marker_colors=["#10b981", "#ef4444"]
-#         )])
-#         fig_pie.update_layout(height=400)
-#         st.plotly_chart(fig_pie, use_container_width=True)
-    
-#     st.markdown("---")
-#     st.subheader("Block Summary")
-    
-#     if not df.empty:
-#         block_table = df.groupby("Block", as_index=False).agg(
-#             Total_Inverters=(inverter_col if inverter_col else df.columns[0], "nunique"),
-#             Total_Active_Strings=("Total Active Strings", "sum"),
-#             Total_Working_Strings=("Working String Count", "sum"),
-#             Total_Failed_Strings=("Failed String Count", "sum")
-#         )
-#         block_table["Availability (%)"] = (
-#             (block_table["Total_Working_Strings"] / block_table["Total_Active_Strings"]) * 100
-#         ).fillna(0).round(2)
-#         block_table["Failure Percentage (%)"] = (
-#             (block_table["Total_Failed_Strings"] / block_table["Total_Active_Strings"]) * 100
-#         ).fillna(0).round(2)
-        
-#         st.dataframe(block_table, use_container_width=True)
-#     else:
-#         st.warning("No block summary available.")
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+# ==========================================
+# DASHBOARD FUNCTIONS
+# ==========================================
+@st.cache_data(ttl=300)
 def calculate_plot_summary(df, inverter_col):
     """Calculate plot-wise summary with caching"""
     if df.empty:
@@ -1267,7 +1159,6 @@ def create_plot_charts(plot_summary):
         textposition="inside",
         insidetextanchor="middle"
     )
-    # Format y-axis to show full numbers without k - Fixed: update_yaxes
     fig_bar.update_yaxes(
         tickformat=",.0f",
         tickprefix="",
@@ -1377,7 +1268,6 @@ def create_plot_charts(plot_summary):
         font=dict(size=12),
         hovermode="closest"
     )
-    # Format axes to show full numbers without k - Fixed: update_xaxes and update_yaxes
     fig_scatter.update_xaxes(
         tickformat=",.0f",
         tickprefix="",
@@ -1438,13 +1328,13 @@ def display_plot_metrics(plot_summary):
     st.subheader("📊 Plot-wise Performance Overview")
     
     # Create metric cards for each plot
-    cols = st.columns(min(4, len(plot_summary)))
+    cols = st.columns(min(5, len(plot_summary)))
     
     for idx, (_, row) in enumerate(plot_summary.iterrows()):
-        if idx >= 4:
+        if idx >= 5:
             break
         
-        col_idx = idx % 4
+        col_idx = idx % 5
         with cols[col_idx]:
             # Determine color based on availability
             avail = row["Availability (%)"]
@@ -1506,6 +1396,7 @@ def display_plot_metrics(plot_summary):
 def main_dashboard_tab(df):
     """Main dashboard tab with Plot-wise visualizations"""
     st.title("☀️ Solar PV String Performance Dashboard")
+    st.caption("Internal beta release — data processing, history, and comparison features are under testing.")
     
     # Find the actual inverter column for display
     inverter_col = None
@@ -1523,7 +1414,7 @@ def main_dashboard_tab(df):
     plot_summary = calculate_plot_summary(df, inverter_col)
     
     # KPIs
-    st.markdown("### 0 Key Performance Indicators")
+    st.markdown("### 📊 Key Performance Indicators")
     kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
     
     total_inverters = df[inverter_col].nunique() if inverter_col and inverter_col in df.columns else 0
@@ -1664,16 +1555,16 @@ def main_dashboard_tab(df):
             - Best performing plot: **{best_plot['Plot']}** ({best_plot['Availability (%)']:.1f}% availability)
             - Needs attention: **{worst_plot['Plot']}** ({worst_plot['Availability (%)']:.1f}% availability)
             - Total working strings: **{working_strings:,}** out of **{total_strings:,}**
-            
             """)
     else:
         st.warning("No plot summary available.")
+
 # ==========================================
-# 9. MAIN APP (UPDATED)
+# 9. MAIN APP
 # ==========================================
 def main():
     # Initialize default users
-    # init_default_users()
+    init_default_users()
     
     # Check authentication
     if "authenticated" not in st.session_state:
@@ -1695,7 +1586,7 @@ def main():
                     st.session_state.user = {
                         "username": username,
                         "role": user_data["role"],
-                        "aPssigned_plots": user_data.get("assigned_plots", [])
+                        "assigned_plots": user_data.get("assigned_plots", [])
                     }
                     st.session_state.authenticated = True
                     st.rerun()
@@ -1703,7 +1594,7 @@ def main():
                     st.error("Invalid username or password")
         
         st.markdown("---")
-        st.caption("Default users:  ")
+        # st.caption("Default users: admin/admin123, engineer1/eng123, engineer2/eng456")
         return
     
     # Get current user
@@ -1716,7 +1607,7 @@ def main():
     st.sidebar.title("⚡ PV String Template")
     
     # User info
-    role_badge = "👑 Admin" if current_user["role"] == "admin" else "🔧 Engineer/ 💼Manager"
+    role_badge = "👑 Admin" if current_user["role"] == "admin" else "🔧 Engineer"
     st.sidebar.markdown(f"**User:** {current_user['username']} ({role_badge})")
     
     # Logout
@@ -1727,35 +1618,51 @@ def main():
     
     st.sidebar.markdown("---")
     
-    # File upload section
+    # File upload section - ADMIN ONLY
     st.sidebar.subheader("📁 File Management")
     
-    # Check if file exists in backend
-    if "current_file" not in st.session_state:
-        latest_file = get_latest_excel_file()
-        if latest_file:
-            st.session_state.current_file = latest_file
+    # Only show file upload and management for admin
+    if is_admin():
+        # Check if file exists in backend
+        if "current_file" not in st.session_state:
+            latest_file = get_latest_excel_file()
+            if latest_file:
+                st.session_state.current_file = latest_file
+        
+        # Show current file info
+        if "current_file" in st.session_state:
+            metadata_file = EXCEL_FILES_DIR / "metadata.json"
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                if st.session_state.current_file in metadata:
+                    st.sidebar.info(f"📄 Current file: {metadata[st.session_state.current_file]['originalfilename']}\n📅 {metadata[st.session_state.current_file]['timestamp']}")
+        
+        # File upload (Admin only)
+        uploaded_file = st.sidebar.file_uploader("Upload new SCADA Report (.xlsx)", type=["xlsx"])
+        if uploaded_file:
+            file_bytes = uploaded_file.getvalue()
+            stored_filename = save_excel_file(file_bytes, uploaded_file.name)
+            st.sidebar.success(f"✅ File uploaded: {uploaded_file.name}")
+            st.rerun()
+    else:
+        # Engineers and other users can only view current file info
+        if "current_file" in st.session_state:
+            metadata_file = EXCEL_FILES_DIR / "metadata.json"
+            if metadata_file.exists():
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                if st.session_state.current_file in metadata:
+                    st.sidebar.info(f"📄 Current file: {metadata[st.session_state.current_file]['originalfilename']}")
+                    st.sidebar.caption(f"📅 Uploaded: {metadata[st.session_state.current_file]['timestamp']}")
+        else:
+            st.sidebar.warning("No file available. Please contact admin.")
     
-    # Show current file info
-    if "current_file" in st.session_state:
-        metadata_file = EXCEL_FILES_DIR / "metadata.json"
-        if metadata_file.exists():
-            with open(metadata_file, 'r') as f:
-                metadata = json.load(f)
-            if st.session_state.current_file in metadata:
-                st.sidebar.info(f"📄 Current file: {metadata[st.session_state.current_file]['originalfilename']}\n📅 {metadata[st.session_state.current_file]['timestamp']}")
-    
-    # File upload
-    uploaded_file = st.sidebar.file_uploader("Upload new SCADA Report (.xlsx)", type=["xlsx"])
-    if uploaded_file:
-        file_bytes = uploaded_file.getvalue()
-        stored_filename = save_excel_file(file_bytes, uploaded_file.name)
-        st.sidebar.success(f"✅ File uploaded: {uploaded_file.name}")
-        st.rerun()
+    st.sidebar.markdown("---")
     
     # Load data from backend
     if "current_file" not in st.session_state:
-        st.info("No SCADA file available. Please upload one.")
+        st.info("No SCADA file available. Please contact admin to upload one.")
         return
     
     file_bytes = load_excel_from_backend(st.session_state.current_file)
@@ -1810,7 +1717,7 @@ def main():
         filtered_df = filtered_df[filtered_df["SACU"] == selected_sacu]
     
     # User management (Admin only)
-    if current_user["role"] == "admin":
+    if is_admin():
         user_management_ui()
     
     # Find inverter column for display
@@ -1826,7 +1733,7 @@ def main():
             break
     
     # Main content with tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🔌 PV String Details", "📋 Data Table"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🔌 PV String Details", "📋 Data Table", "Restore & TAT(launching soon..)"])
     
     with tab1:
         if not filtered_df.empty:
@@ -1865,7 +1772,7 @@ def main():
                 }
             )
             
-            # Download button
+            # Download button - available to all users
             download_bytes = create_excel_download({sheet_selection: filtered_df})
             st.download_button(
                 label="📥 Download Filtered Excel",
@@ -1874,7 +1781,13 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.info("No data available")
+            st.info("No data available")    # NEW TAB: Restore & TAT Analysis
+    with tab4:
+        if not filtered_df.empty:
+            # Use current_df for history update
+            restore.get_restore_tab(processed_dataframes, filtered_df)
+        else:
+            st.warning("No data available for TAT analysis")
 
 if __name__ == "__main__":
     main()
